@@ -808,8 +808,8 @@ app.listen(PORT, '0.0.0.0', () => {
 ╠══════════════════════════════════════════════════════════════╣
 ║  Status: Running on port ${PORT}                                   ║
 ║  Environment: ${process.env.NODE_ENV || 'development'}                              ║
-║  Health: ${process.env.NODE_ENV === 'production' ? 'https://[your-app].onrender.com' : `http://localhost:${PORT}`}/api/health            ║
-║  Docs:   ${process.env.NODE_ENV === 'production' ? 'https://[your-app].onrender.com' : `http://localhost:${PORT}`}/api/docs              ║
+║  Health: ${process.env.NODE_ENV === 'production' ? 'https://smartyapi.onrender.com' : `http://localhost:${PORT}`}/api/health            ║
+║  Docs:   ${process.env.NODE_ENV === 'production' ? 'https://smartyapi.onrender.com' : `http://localhost:${PORT}`}/api/docs              ║
 ║                                                              ║
 ║  Providers:                                                  ║
 ║    • SmartyStreets: ${process.env.SMARTYSTREETS_AUTH_ID ? 'Enabled' : 'Disabled'}                             ║
