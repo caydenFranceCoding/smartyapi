@@ -9,17 +9,17 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(cors({
   origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl requests)
     if(!origin) return callback(null, true);
     
     // Define allowed origins
     const allowedOrigins = [
       'https://app.hubspot.com',
       'https://23263666.hubspotpreview-na1.com',
-      'https://localhost:3000'
+      'https://localhost:3000',
+      'https://wattkarma.com',         
+      'https://wattkarma.com/ohioinfo'   
     ];
     
-    // Check if origin is allowed or matches hubspot.com domain
     if(allowedOrigins.indexOf(origin) !== -1 || origin.match(/^https:\/\/[a-zA-Z0-9-]+\.hubspot\.com$/)) {
       callback(null, true);
     } else {
