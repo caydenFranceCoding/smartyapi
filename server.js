@@ -11,7 +11,6 @@ app.use(cors({
   origin: function(origin, callback) {
     if(!origin) return callback(null, true);
     
-    // Define allowed origins
     const allowedOrigins = [
       'https://app.hubspot.com',
       'https://23263666.hubspotpreview-na1.com',
@@ -233,8 +232,7 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
           code: smartyError.code
         });
 
-        // Continue to fallback rather than failing completely
-        console.log('Falling back to Nominatim geocoding service...');
+1        console.log('Falling back to Nominatim geocoding service...');
       }
     }
 
@@ -243,7 +241,7 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
 
     const nominatimResponse = await axios.get('https://nominatim.openstreetmap.org/search', {
       params: {
-        q: `${normalizedQuery}, Ohio, USA`,
+        q: `${normalizedQuery}, OH`,
         format: 'json',
         addressdetails: 1,
         limit: resultLimit,
@@ -328,7 +326,7 @@ app.get('/api/address-suggestions', async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'Invalid query parameter',
-        message: 'Query parameter is required and must be at least 2 characters long',
+        message: 'Query parameter is required and it must be at least 2 characters long',
         code: 'INVALID_QUERY'
       });
     }
@@ -831,7 +829,7 @@ app.listen(PORT, '0.0.0.0', () => {
 ║    • SmartyStreets: ${process.env.SMARTYSTREETS_AUTH_ID ? 'Enabled' : 'Disabled'}                             ║
 ║    • Nominatim:     Enabled                                  ║
 ║                                                              ║
-║  Ready to serve Ohio address suggestions                     ║
+║  Ready for Ohio address suggestions                     ║
 ╚══════════════════════════════════════════════════════════════╝
   `);
 });
