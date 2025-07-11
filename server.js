@@ -814,7 +814,9 @@ app.use('*', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, '0.0.0.0', () => {
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔══════════════════════════════════════════════════════════════╗
 ║                    Ohio Address API Server                  ║
@@ -822,14 +824,17 @@ app.listen(PORT, '0.0.0.0', () => {
 ╠══════════════════════════════════════════════════════════════╣
 ║  Status: Running on port ${PORT}                                   ║
 ║  Environment: ${process.env.NODE_ENV || 'development'}                              ║
-║  Health: ${process.env.NODE_ENV === 'production' ? 'https://smartyapi.onrender.com' : `http://localhost:${PORT}`}/api/health            ║
-║  Docs:   ${process.env.NODE_ENV === 'production' ? 'https://smartyapi.onrender.com' : `http://localhost:${PORT}`}/api/docs              ║
+║  Health: http://localhost:${PORT}/api/health                 ║
+║  Docs:   http://localhost:${PORT}/api/docs                   ║
 ║                                                              ║
 ║  Providers:                                                  ║
 ║    • SmartyStreets: ${process.env.SMARTYSTREETS_AUTH_ID ? 'Enabled' : 'Disabled'}                             ║
 ║    • Nominatim:     Enabled                                  ║
 ║                                                              ║
-║  Ready for Ohio address suggestions                     ║
+║  Ready for Ohio address suggestions                          ║
 ╚══════════════════════════════════════════════════════════════╝
-  `);
-});
+    `);
+  });
+}
+
+module.exports = app;
