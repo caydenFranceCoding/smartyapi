@@ -8,10 +8,31 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors({
-  origin: ['https://app.hubspot.com', 'https://*.hubspot.com', 'https://localhost:3000'],
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = [
+      'https://app.hubspot.com',
+      'https://localhost:3000'
+    ];
+    
+    // Check for exact matches
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    // Check for HubSpot domains (both regular and preview)
+    if (origin.match(/^https:\/\/.*\.hubspot\.com$/) || 
+        origin.match(/^https:\/\/.*\.hubspotpreview-na1\.com$/)) {
+      return callback(null, true);
+    }
+    
+    // Reject other origins
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true
 }));
-app.use(express.json());
 
 // Enhanced rate limiting
 const requestCounts = new Map();
