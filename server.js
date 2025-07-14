@@ -364,17 +364,23 @@ function formatSmartyStreetsAddress(addressData) {
   const components = addressData.components || {};
   const metadata = addressData.metadata || {};
   
+  const cityName = components.city_name || '';
+  const stateAbbr = components.state_abbreviation || 'OH';
+  const zipCode = components.zipcode || '';
+  
+  const cityStateZip = [cityName, stateAbbr, zipCode].filter(Boolean).join(' ');
+  
   return {
     formatted: [
       addressData.delivery_line_1,
       addressData.delivery_line_2,
-      `${components.city_name}, ${components.state_abbreviation} ${components.zipcode}`
+      cityStateZip
     ].filter(Boolean).join(', '),
     street: addressData.delivery_line_1 + (addressData.delivery_line_2 ? ' ' + addressData.delivery_line_2 : ''),
-    city: components.city_name,
-    state: components.state_abbreviation,
+    city: cityName,
+    state: stateAbbr,
     country: 'US',
-    postalCode: components.zipcode,
+    postalCode: zipCode,
     latitude: parseFloat(metadata.latitude) || null,
     longitude: parseFloat(metadata.longitude) || null,
     county: metadata.county_name || '',
@@ -387,13 +393,17 @@ function formatSmartyStreetsAddress(addressData) {
 function formatNominatimAddress(addressData) {
   const address = addressData.address || {};
   
+  const city = address.city || address.town || address.village || '';
+  const state = address.state || 'OH';
+  const postalCode = address.postcode || '';
+  
   return {
     formatted: addressData.display_name || '',
     street: address.road || '',
-    city: address.city || address.town || address.village || '',
-    state: address.state || '',
+    city: city,
+    state: state,
     country: address.country || 'US',
-    postalCode: address.postcode || '',
+    postalCode: postalCode,
     latitude: parseFloat(addressData.lat) || null,
     longitude: parseFloat(addressData.lon) || null,
     county: address.county || '',
