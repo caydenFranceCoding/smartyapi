@@ -364,23 +364,25 @@ function formatSmartyStreetsAddress(addressData) {
   const components = addressData.components || {};
   const metadata = addressData.metadata || {};
   
-  const cityName = components.city_name || '';
-  const stateAbbr = components.state_abbreviation || 'OH';
-  const zipCode = components.zipcode || '';
+  const street = [
+    addressData.delivery_line_1 || '',
+    addressData.delivery_line_2 || ''
+  ].filter(Boolean).join(' ').trim();
   
-  const cityStateZip = [cityName, stateAbbr, zipCode].filter(Boolean).join(' ');
+  const city = components.city_name || '';
+  const state = components.state_abbreviation || 'OH';
+  const zipcode = components.zipcode || '';
+  
+  const cityStateZip = [city, state, zipcode].filter(Boolean).join(', ');
   
   return {
-    formatted: [
-      addressData.delivery_line_1,
-      addressData.delivery_line_2,
-      cityStateZip
-    ].filter(Boolean).join(', '),
-    street: addressData.delivery_line_1 + (addressData.delivery_line_2 ? ' ' + addressData.delivery_line_2 : ''),
-    city: cityName,
-    state: stateAbbr,
+    formatted: [street, cityStateZip].filter(Boolean).join(', '),
+    street: street,
+    city: city,
+    state: state,
+    zipcode: zipcode,
     country: 'US',
-    postalCode: zipCode,
+    postalCode: zipcode,
     latitude: parseFloat(metadata.latitude) || null,
     longitude: parseFloat(metadata.longitude) || null,
     county: metadata.county_name || '',
@@ -393,17 +395,23 @@ function formatSmartyStreetsAddress(addressData) {
 function formatNominatimAddress(addressData) {
   const address = addressData.address || {};
   
-  const city = address.city || address.town || address.village || '';
+  const street = [
+    address.house_number || '',
+    address.road || ''
+  ].filter(Boolean).join(' ').trim();
+  
+  const city = address.city || address.town || address.village || address.municipality || '';
   const state = address.state || 'OH';
-  const postalCode = address.postcode || '';
+  const zipcode = address.postcode || '';
   
   return {
     formatted: addressData.display_name || '',
-    street: address.road || '',
+    street: street,
     city: city,
     state: state,
+    zipcode: zipcode,
     country: address.country || 'US',
-    postalCode: postalCode,
+    postalCode: zipcode,
     latitude: parseFloat(addressData.lat) || null,
     longitude: parseFloat(addressData.lon) || null,
     county: address.county || '',
