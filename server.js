@@ -212,8 +212,11 @@ async function processOhioAddress(query, limit = 5) {
     };
   }
 
+  console.log(`Processing address query: "${normalizedQuery}"`);
+
   if (process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN) {
     try {
+      console.log('Trying SmartyStreets...');
       const smartyResponse = await axiosInstance.get('https://us-street.api.smartystreets.com/street-address', {
         params: {
           'auth-id': process.env.SMARTYSTREETS_AUTH_ID,
@@ -226,29 +229,45 @@ async function processOhioAddress(query, limit = 5) {
         timeout: 4000
       });
 
+      console.log(`SmartyStreets raw response:`, JSON.stringify(smartyResponse.data, null, 2));
+
       if (smartyResponse.data.length > 0) {
         const suggestions = smartyResponse.data
           .filter(addr => addr.components?.state_abbreviation === 'OH')
-          .map(formatSmartyStreetsAddress)
+          .map(addr => {
+            console.log('Processing SmartyStreets address:', JSON.stringify(addr, null, 2));
+            const formatted = formatSmartyStreetsAddress(addr);
+            console.log('Formatted result:', JSON.stringify(formatted, null, 2));
+            return formatted;
+          })
+          .filter(Boolean) // Remove null results
           .slice(0, resultLimit);
 
-        cache.set(cacheKey, suggestions);
-        return {
-          suggestions,
-          metadata: {
-            source: 'smartystreets',
-            provider: 'SmartyStreets',
-            count: suggestions.length,
-            verified: true,
-            cached: false
-          }
-        };
+        console.log('Final SmartyStreets suggestions:', JSON.stringify(suggestions, null, 2));
+
+        if (suggestions.length > 0) {
+          cache.set(cacheKey, suggestions);
+          return {
+            suggestions,
+            metadata: {
+              source: 'smartystreets',
+              provider: 'SmartyStreets',
+              count: suggestions.length,
+              verified: true,
+              cached: false
+            }
+          };
+        } else {
+          console.log('No valid SmartyStreets results after formatting, trying Nominatim...');
+        }
       }
     } catch (error) {
-      console.log('SmartyStreets failed, using fallback');
+      console.error('SmartyStreets error:', error.message);
+      console.log('Falling back to Nominatim...');
     }
   }
 
+  console.log('Using Nominatim fallback...');
   const nominatimPromises = [
     axiosInstance.get('https://nominatim.openstreetmap.org/search', {
       params: {
@@ -283,13 +302,21 @@ async function processOhioAddress(query, limit = 5) {
   const responses = await Promise.allSettled(nominatimPromises);
   const allResults = responses
     .filter(r => r.status === 'fulfilled')
-    .flatMap(r => r.value.data)
+    .flatMap(r => {
+      console.log('Nominatim raw response:', JSON.stringify(r.value.data, null, 2));
+      return r.value.data;
+    })
     .filter(addr => addr.address?.state?.toLowerCase().includes('ohio'))
-    .map(formatNominatimAddress);
+    .map(addr => {
+      console.log('Processing Nominatim address:', JSON.stringify(addr, null, 2));
+      return formatNominatimAddress(addr);
+    });
 
   const uniqueResults = allResults.filter((addr, index, arr) => 
     arr.findIndex(a => a.formatted === addr.formatted) === index
   ).slice(0, resultLimit);
+
+  console.log('Final processed results:', JSON.stringify(uniqueResults, null, 2));
 
   cache.set(cacheKey, uniqueResults);
 
@@ -361,28 +388,50 @@ async function preWarmCache() {
 }
 
 function formatSmartyStreetsAddress(addressData) {
+  console.log('Raw SmartyStreets address data:', JSON.stringify(addressData, null, 2));
+  
   const components = addressData.components || {};
   const metadata = addressData.metadata || {};
   
-  const street = [
-    addressData.delivery_line_1 || '',
-    addressData.delivery_line_2 || ''
-  ].filter(Boolean).join(' ').trim();
+  // SmartyStreets might return data in different fields, let's try multiple approaches
+  const street = addressData.delivery_line_1 || 
+                 addressData.primary_number + ' ' + addressData.street_name || 
+                 components.primary_number + ' ' + components.street_name || 
+                 '';
   
-  const city = components.city_name || '';
-  const state = components.state_abbreviation || 'OH';
-  const zipcode = components.zipcode || '';
+  const city = components.city_name || 
+               addressData.city_name || 
+               components.default_city_name || 
+               '';
+  
+  const state = components.state_abbreviation || 
+                addressData.state_abbreviation || 
+                'OH';
+  
+  const zipcode = components.zipcode || 
+                  addressData.zipcode || 
+                  components.plus4_code ? components.zipcode + '-' + components.plus4_code : components.zipcode ||
+                  '';
+  
+  console.log('Extracted components:', { street, city, state, zipcode });
+  
+  // If we still don't have basic info, this might be an invalid response
+  if (!street && !city && !zipcode) {
+    console.log('Warning: No address components found in SmartyStreets response');
+    return null; // Return null so this address gets filtered out
+  }
   
   const cityStateZip = [city, state, zipcode].filter(Boolean).join(', ');
+  const formatted = [street, cityStateZip].filter(Boolean).join(', ');
   
   return {
-    formatted: [street, cityStateZip].filter(Boolean).join(', '),
+    formatted: formatted || `${city}, ${state} ${zipcode}`.trim(),
     street: street,
     city: city,
     state: state,
     zipcode: zipcode,
-    country: 'US',
     postalCode: zipcode,
+    country: 'US',
     latitude: parseFloat(metadata.latitude) || null,
     longitude: parseFloat(metadata.longitude) || null,
     county: metadata.county_name || '',
@@ -410,8 +459,8 @@ function formatNominatimAddress(addressData) {
     city: city,
     state: state,
     zipcode: zipcode,
-    country: address.country || 'US',
     postalCode: zipcode,
+    country: address.country || 'US',
     latitude: parseFloat(addressData.lat) || null,
     longitude: parseFloat(addressData.lon) || null,
     county: address.county || '',
