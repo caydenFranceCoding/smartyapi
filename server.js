@@ -101,39 +101,19 @@ function setCachedResult(key, data) {
 // Enhanced address formatting
 function formatSmartyStreetsAddress(addressData) {
   return {
-    formatted: [
-      addressData.delivery_line_1,
-      addressData.delivery_line_2,
-      `${addressData.components.city_name}, ${addressData.components.state_abbreviation} ${addressData.components.zipcode}`
-    ].filter(Boolean).join(', '),
-    street: addressData.delivery_line_1 + (addressData.delivery_line_2 ? ' ' + addressData.delivery_line_2 : ''),
+    address: addressData.delivery_line_1 + (addressData.delivery_line_2 ? ' ' + addressData.delivery_line_2 : ''),
     city: addressData.components.city_name,
     state: addressData.components.state_abbreviation,
-    country: 'US',
-    postalCode: addressData.components.zipcode,
-    latitude: parseFloat(addressData.metadata?.latitude) || null,
-    longitude: parseFloat(addressData.metadata?.longitude) || null,
-    county: addressData.metadata?.county_name || '',
-    verified: addressData.analysis?.dpv_match_y === 'Y',
-    precision: 'USPS_VALIDATED',
-    source: 'smartystreets'
+    zipcode: addressData.components.zipcode
   };
 }
 
 function formatNominatimAddress(addressData) {
   return {
-    formatted: addressData.display_name || '',
-    street: addressData.address?.road || '',
+    address: addressData.address?.road || '',
     city: addressData.address?.city || addressData.address?.town || addressData.address?.village || '',
     state: addressData.address?.state || '',
-    country: addressData.address?.country || 'US',
-    postalCode: addressData.address?.postcode || '',
-    latitude: parseFloat(addressData.lat) || null,
-    longitude: parseFloat(addressData.lon) || null,
-    county: addressData.address?.county || '',
-    verified: false,
-    precision: 'APPROXIMATE',
-    source: 'nominatim'
+    zipcode: addressData.address?.postcode || ''
   };
 }
 
