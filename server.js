@@ -26,7 +26,13 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors({
-  origin: ['https://app.hubspot.com', 'https://*.hubspot.com', 'https://localhost:3000'],
+  origin: [
+    'https://app.hubspot.com', 
+    'https://*.hubspot.com',
+    'https://23263666.hubspotpreview-na1.com',
+    'https://wattkarma.com',
+    'https://localhost:3000'
+  ],
   credentials: true,
   optionsSuccessStatus: 200
 }));
