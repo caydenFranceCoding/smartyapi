@@ -144,6 +144,7 @@ function formatSmartyStreetsAddress(addressData) {
   }
 }
 
+// FIXED: Updated formatNominatimAddress function
 function formatNominatimAddress(addressData) {
   try {
     if (!addressData) {
@@ -164,10 +165,19 @@ function formatNominatimAddress(addressData) {
       streetAddress = addressData.display_name.split(',')[0] || '';
     }
 
+    // FIXED: Get city name - try multiple fields
+    const city = address.city || address.town || address.village || address.municipality || '';
+    
+    // FIXED: Get state - handle both "Ohio" and "OH"
+    let state = address.state || '';
+    if (state.toLowerCase() === 'ohio') {
+      state = 'OH';
+    }
+
     return {
       address: streetAddress,
-      city: address.city || address.town || address.village || '',
-      state: address.state || 'OH',
+      city: city,
+      state: state,
       zipcode: address.postcode || '',
       verified: false
     };
@@ -379,14 +389,15 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
       console.log(`Nominatim response: status=${nominatimResponse.status}, data length=${nominatimResponse.data?.length || 0}`);
 
       if (nominatimResponse.status === 200 && nominatimResponse.data && Array.isArray(nominatimResponse.data) && nominatimResponse.data.length > 0) {
-        // Filter and format Ohio addresses
+        // FIXED: Better Ohio filtering
         const nominatimSuggestions = nominatimResponse.data
           .filter(addr => {
             const state = addr.address?.state?.toLowerCase();
-            return state && (state.includes('ohio') || state === 'oh');
+            const isOhio = state && (state.includes('ohio') || state === 'oh');
+            return isOhio;
           })
           .map(formatNominatimAddress)
-          .filter(addr => addr !== null && addr.address)
+          .filter(addr => addr !== null && addr.address && addr.address.trim() !== '')
           .slice(0, resultLimit);
 
         if (nominatimSuggestions.length > 0) {
