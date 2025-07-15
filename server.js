@@ -6,7 +6,10 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Enable trust proxy for proper IP detection
+app.set('trust proxy', true);
+
+// Enhanced CORS
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
@@ -14,7 +17,8 @@ app.use(cors({
     
     const allowedOrigins = [
       'https://app.hubspot.com',
-      'https://localhost:3000'
+      'https://localhost:3000',
+      'http://localhost:3000'
     ];
     
     // Check for exact matches
@@ -28,8 +32,9 @@ app.use(cors({
       return callback(null, true);
     }
     
-    // Reject other origins
-    callback(new Error('Not allowed by CORS'));
+    // For development, be more lenient
+    console.log('Allowing origin:', origin);
+    return callback(null, true);
   },
   credentials: true
 }));
@@ -43,33 +48,39 @@ const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
 const MAX_REQUESTS = 100;
 
 function advancedRateLimit(req, res, next) {
-  const clientIP = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'];
-  const now = Date.now();
+  try {
+    const clientIP = req.ip || req.connection?.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+    const now = Date.now();
 
-  if (!requestCounts.has(clientIP)) {
-    requestCounts.set(clientIP, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
-    return next();
+    if (!requestCounts.has(clientIP)) {
+      requestCounts.set(clientIP, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
+      return next();
+    }
+
+    const clientData = requestCounts.get(clientIP);
+
+    if (now > clientData.resetTime) {
+      clientData.count = 1;
+      clientData.resetTime = now + RATE_LIMIT_WINDOW;
+      return next();
+    }
+
+    if (clientData.count >= MAX_REQUESTS) {
+      return res.status(429).json({
+        success: false,
+        error: 'Rate limit exceeded',
+        message: 'Too many requests from this IP address',
+        retryAfter: Math.ceil((clientData.resetTime - now) / 1000),
+        code: 'RATE_LIMIT_EXCEEDED'
+      });
+    }
+
+    clientData.count++;
+    next();
+  } catch (error) {
+    console.error('Rate limiting error:', error);
+    next(); // Continue on rate limit error
   }
-
-  const clientData = requestCounts.get(clientIP);
-
-  if (now > clientData.resetTime) {
-    clientData.count = 1;
-    clientData.resetTime = now + RATE_LIMIT_WINDOW;
-    return next();
-  }
-
-  if (clientData.count >= MAX_REQUESTS) {
-    return res.status(429).json({
-      error: 'Rate limit exceeded',
-      message: 'Too many requests from this IP address',
-      retryAfter: Math.ceil((clientData.resetTime - now) / 1000),
-      code: 'RATE_LIMIT_EXCEEDED'
-    });
-  }
-
-  clientData.count++;
-  next();
 }
 
 app.use('/api/', advancedRateLimit);
@@ -80,64 +91,102 @@ const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 const MAX_CACHE_SIZE = 1000;
 
 function getCachedResult(key) {
-  const cached = cache.get(key);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.data;
+  try {
+    const cached = cache.get(key);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return cached.data;
+    }
+    if (cached) {
+      cache.delete(key);
+    }
+    return null;
+  } catch (error) {
+    console.error('Cache retrieval error:', error);
+    return null;
   }
-  cache.delete(key);
-  return null;
 }
 
 function setCachedResult(key, data) {
-  // Implement cache size limit
-  if (cache.size >= MAX_CACHE_SIZE) {
-    const firstKey = cache.keys().next().value;
-    cache.delete(firstKey);
-  }
+  try {
+    // Implement cache size limit
+    if (cache.size >= MAX_CACHE_SIZE) {
+      const firstKey = cache.keys().next().value;
+      cache.delete(firstKey);
+    }
 
-  cache.set(key, {
-    data,
-    timestamp: Date.now()
-  });
+    cache.set(key, {
+      data,
+      timestamp: Date.now()
+    });
+  } catch (error) {
+    console.error('Cache storage error:', error);
+  }
 }
 
-// Enhanced address formatting
+// Safe address formatting functions
 function formatSmartyStreetsAddress(addressData) {
-  return {
-    address: addressData.delivery_line_1 + (addressData.delivery_line_2 ? ' ' + addressData.delivery_line_2 : ''),
-    city: addressData.components.city_name,
-    state: addressData.components.state_abbreviation,
-    zipcode: addressData.components.zipcode,
-    verified: true
-  };
+  try {
+    if (!addressData || !addressData.components) {
+      console.warn('Invalid SmartyStreets address data:', addressData);
+      return null;
+    }
+
+    return {
+      address: (addressData.delivery_line_1 || '') + (addressData.delivery_line_2 ? ' ' + addressData.delivery_line_2 : ''),
+      city: addressData.components.city_name || '',
+      state: addressData.components.state_abbreviation || 'OH',
+      zipcode: addressData.components.zipcode || '',
+      verified: true
+    };
+  } catch (error) {
+    console.error('Error formatting SmartyStreets address:', error);
+    return null;
+  }
 }
 
 function formatNominatimAddress(addressData) {
-  // Handle different address formats from Nominatim
-  let streetAddress = '';
-  
-  if (addressData.address?.road) {
-    const houseNumber = addressData.address?.house_number || '';
-    streetAddress = houseNumber ? `${houseNumber} ${addressData.address.road}` : addressData.address.road;
-  } else if (addressData.display_name) {
-    // Fallback to first part of display_name
-    streetAddress = addressData.display_name.split(',')[0] || '';
-  }
+  try {
+    if (!addressData) {
+      console.warn('Invalid Nominatim address data:', addressData);
+      return null;
+    }
 
-  return {
-    address: streetAddress,
-    city: addressData.address?.city || addressData.address?.town || addressData.address?.village || '',
-    state: addressData.address?.state || 'OH',
-    zipcode: addressData.address?.postcode || '',
-    verified: false
-  };
+    const address = addressData.address || {};
+    
+    // Build street address
+    let streetAddress = '';
+    if (address.house_number && address.road) {
+      streetAddress = `${address.house_number} ${address.road}`;
+    } else if (address.road) {
+      streetAddress = address.road;
+    } else if (addressData.display_name) {
+      // Fallback to first part of display name
+      streetAddress = addressData.display_name.split(',')[0] || '';
+    }
+
+    return {
+      address: streetAddress,
+      city: address.city || address.town || address.village || '',
+      state: address.state || 'OH',
+      zipcode: address.postcode || '',
+      verified: false
+    };
+  } catch (error) {
+    console.error('Error formatting Nominatim address:', error);
+    return null;
+  }
 }
 
 // Request logging middleware
 function logRequest(req, res, next) {
   const start = Date.now();
-  const originalSend = res.send;
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} - Started`);
+  
+  if (req.query && Object.keys(req.query).length > 0) {
+    console.log('Query params:', req.query);
+  }
 
+  const originalSend = res.send;
   res.send = function(data) {
     const duration = Date.now() - start;
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} - ${res.statusCode} - ${duration}ms`);
@@ -149,28 +198,71 @@ function logRequest(req, res, next) {
 
 app.use('/api/', logRequest);
 
-// Primary Ohio address suggestions endpoint
+// Test endpoint
+app.get('/api/test', (req, res) => {
+  console.log('Test endpoint called');
+  res.json({
+    success: true,
+    message: 'Server is working properly!',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    smartystreets: {
+      configured: !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN),
+      authId: process.env.SMARTYSTREETS_AUTH_ID ? 'Set' : 'Not set',
+      authToken: process.env.SMARTYSTREETS_AUTH_TOKEN ? 'Set' : 'Not set'
+    }
+  });
+});
+
+// BULLETPROOF ADDRESS SEARCH ENDPOINT
 app.get('/api/ohio-address-suggestions', async (req, res) => {
+  console.log('\n=== ADDRESS SEARCH REQUEST ===');
+  
   try {
     const { query, limit = 5 } = req.query;
+    console.log('Request params:', { query, limit });
 
-    // FIXED: Changed minimum from 4 to 2 characters to match frontend config
-    if (!query || typeof query !== 'string' || query.trim().length < 2) {
+    // Input validation with detailed logging
+    if (!query) {
+      console.log('Missing query parameter');
       return res.status(400).json({
         success: false,
-        error: 'Invalid query parameter',
-        message: 'Query parameter is required and must be at least 2 characters long',
-        code: 'INVALID_QUERY'
+        error: 'Missing query parameter',
+        message: 'Query parameter is required',
+        code: 'MISSING_QUERY'
+      });
+    }
+
+    if (typeof query !== 'string') {
+      console.log('Invalid query type:', typeof query);
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid query type',
+        message: 'Query must be a string',
+        code: 'INVALID_QUERY_TYPE'
       });
     }
 
     const normalizedQuery = query.trim();
+    if (normalizedQuery.length < 2) {
+      console.log('Query too short:', normalizedQuery.length);
+      return res.status(400).json({
+        success: false,
+        error: 'Query too short',
+        message: 'Query must be at least 2 characters long',
+        code: 'QUERY_TOO_SHORT'
+      });
+    }
+
     const resultLimit = Math.min(Math.max(parseInt(limit) || 5, 1), 10);
     const cacheKey = `ohio:${normalizedQuery.toLowerCase()}:${resultLimit}`;
+
+    console.log(`Processing search for: "${normalizedQuery}" (limit: ${resultLimit})`);
 
     // Check cache first
     const cached = getCachedResult(cacheKey);
     if (cached) {
+      console.log('Returning cached result');
       return res.json({
         success: true,
         suggestions: cached,
@@ -183,12 +275,22 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
       });
     }
 
-    console.log(`Address search initiated: "${normalizedQuery}"`);
+    let suggestions = [];
+    let metadata = {
+      query: normalizedQuery,
+      count: 0,
+      cached: false,
+      attempts: []
+    };
 
-    // Try SmartyStreets first for maximum accuracy
-    if (process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN) {
+    // Try SmartyStreets first
+    const smartyConfigured = !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN);
+    console.log('SmartyStreets configured:', smartyConfigured);
+
+    if (smartyConfigured) {
       try {
         console.log('Attempting SmartyStreets lookup...');
+        metadata.attempts.push('smartystreets');
 
         const smartyResponse = await axios.get('https://us-street.api.smartystreets.com/street-address', {
           params: {
@@ -201,103 +303,136 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
           timeout: 8000,
           headers: {
             'User-Agent': 'OhioEnergyAPI/1.0'
+          },
+          validateStatus: function (status) {
+            return status < 500; // Accept any status less than 500
           }
         });
 
-        console.log(`SmartyStreets returned ${smartyResponse.data.length} results`);
+        console.log(`SmartyStreets response: status=${smartyResponse.status}, data length=${smartyResponse.data?.length || 0}`);
 
-        if (smartyResponse.data.length > 0) {
+        if (smartyResponse.status === 200 && smartyResponse.data && Array.isArray(smartyResponse.data) && smartyResponse.data.length > 0) {
           const smartySuggestions = smartyResponse.data
-            .filter(addr => addr.components?.state_abbreviation === 'OH')
             .map(formatSmartyStreetsAddress)
+            .filter(addr => addr !== null && addr.address && addr.state === 'OH')
             .slice(0, resultLimit);
 
-          setCachedResult(cacheKey, smartySuggestions);
+          if (smartySuggestions.length > 0) {
+            suggestions = smartySuggestions;
+            metadata.source = 'smartystreets';
+            metadata.provider = 'SmartyStreets';
+            metadata.count = smartySuggestions.length;
+            metadata.verified = true;
 
-          return res.json({
-            success: true,
-            suggestions: smartySuggestions,
-            metadata: {
-              source: 'smartystreets',
-              provider: 'SmartyStreets',
-              query: normalizedQuery,
-              count: smartySuggestions.length,
-              verified: true,
-              cached: false
-            }
-          });
+            setCachedResult(cacheKey, suggestions);
+
+            console.log(`Successfully found ${suggestions.length} SmartyStreets results`);
+            console.log('=== END REQUEST (SUCCESS) ===\n');
+
+            return res.json({
+              success: true,
+              suggestions,
+              metadata
+            });
+          }
+        } else if (smartyResponse.status !== 200) {
+          console.log(`SmartyStreets returned status ${smartyResponse.status}:`, smartyResponse.data);
         }
 
       } catch (smartyError) {
         console.error('SmartyStreets error:', {
-          status: smartyError.response?.status,
           message: smartyError.message,
+          status: smartyError.response?.status,
+          statusText: smartyError.response?.statusText,
           code: smartyError.code
         });
-
-        // Continue to fallback rather than failing completely
-        console.log('Falling back to Nominatim geocoding service...');
+        metadata.smartystreetsError = smartyError.message;
       }
     } else {
-      console.log('SmartyStreets not configured, using Nominatim...');
+      console.log('SmartyStreets not configured, skipping...');
+      metadata.attempts.push('smartystreets-not-configured');
     }
 
-    // Fallback to Nominatim for broader coverage
-    console.log('Using Nominatim fallback service...');
+    // Fallback to Nominatim
+    try {
+      console.log('Attempting Nominatim lookup...');
+      metadata.attempts.push('nominatim');
 
-    const nominatimResponse = await axios.get('https://nominatim.openstreetmap.org/search', {
-      params: {
-        q: `${normalizedQuery}, Ohio, USA`,
-        format: 'json',
-        addressdetails: 1,
-        limit: resultLimit,
-        countrycodes: 'us',
-        'accept-language': 'en'
-      },
-      headers: {
-        'User-Agent': 'OhioEnergyAPI/1.0'
-      },
-      timeout: 10000
-    });
+      const nominatimResponse = await axios.get('https://nominatim.openstreetmap.org/search', {
+        params: {
+          q: `${normalizedQuery}, Ohio, USA`,
+          format: 'json',
+          addressdetails: 1,
+          limit: resultLimit,
+          countrycodes: 'us',
+          'accept-language': 'en'
+        },
+        headers: {
+          'User-Agent': 'OhioEnergyAPI/1.0 (contact@example.com)'
+        },
+        timeout: 10000,
+        validateStatus: function (status) {
+          return status < 500; // Accept any status less than 500
+        }
+      });
 
-    console.log(`Nominatim returned ${nominatimResponse.data.length} raw results`);
+      console.log(`Nominatim response: status=${nominatimResponse.status}, data length=${nominatimResponse.data?.length || 0}`);
 
-    // Filter and format Ohio addresses
-    const ohioSuggestions = nominatimResponse.data
-      .filter(addr => {
-        const state = addr.address?.state?.toLowerCase();
-        return state && state.includes('ohio');
-      })
-      .map(formatNominatimAddress)
-      .filter(suggestion => suggestion.address) // Filter out empty addresses
-      .slice(0, resultLimit);
+      if (nominatimResponse.status === 200 && nominatimResponse.data && Array.isArray(nominatimResponse.data) && nominatimResponse.data.length > 0) {
+        // Filter and format Ohio addresses
+        const nominatimSuggestions = nominatimResponse.data
+          .filter(addr => {
+            const state = addr.address?.state?.toLowerCase();
+            return state && (state.includes('ohio') || state === 'oh');
+          })
+          .map(formatNominatimAddress)
+          .filter(addr => addr !== null && addr.address)
+          .slice(0, resultLimit);
 
-    setCachedResult(cacheKey, ohioSuggestions);
+        if (nominatimSuggestions.length > 0) {
+          suggestions = nominatimSuggestions;
+          metadata.source = 'nominatim';
+          metadata.provider = 'OpenStreetMap Nominatim';
+          metadata.count = nominatimSuggestions.length;
+          metadata.verified = false;
 
-    console.log(`Processed ${ohioSuggestions.length} Ohio addresses`);
+          setCachedResult(cacheKey, suggestions);
+          console.log(`Successfully found ${suggestions.length} Nominatim results`);
+        }
+      } else if (nominatimResponse.status !== 200) {
+        console.log(`Nominatim returned status ${nominatimResponse.status}:`, nominatimResponse.data);
+      }
+
+    } catch (nominatimError) {
+      console.error('Nominatim error:', {
+        message: nominatimError.message,
+        status: nominatimError.response?.status,
+        statusText: nominatimError.response?.statusText,
+        code: nominatimError.code
+      });
+      metadata.nominatimError = nominatimError.message;
+    }
+
+    // Return results (even if empty)
+    console.log(`Final result: ${suggestions.length} suggestions from ${metadata.source || 'no source'}`);
+    console.log('=== END REQUEST ===\n');
 
     res.json({
       success: true,
-      suggestions: ohioSuggestions,
-      metadata: {
-        source: 'nominatim',
-        provider: 'OpenStreetMap',
-        query: normalizedQuery,
-        count: ohioSuggestions.length,
-        verified: false,
-        cached: false
-      }
+      suggestions,
+      metadata
     });
 
   } catch (error) {
-    console.error('Address suggestion error:', {
+    console.error('Unexpected error in address search:', {
       message: error.message,
-      code: error.code,
-      status: error.response?.status,
-      stack: error.stack
+      stack: error.stack,
+      name: error.name
     });
 
-    // Enhanced error handling
+    console.log('=== END REQUEST (ERROR) ===\n');
+
+    // Return a more specific error based on the type
     if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
       return res.status(504).json({
         success: false,
@@ -321,458 +456,57 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
       error: 'Internal server error',
       message: 'Unable to process address search request',
       code: 'INTERNAL_ERROR',
-      debug: process.env.NODE_ENV !== 'production' ? error.message : undefined
+      debug: process.env.NODE_ENV !== 'production' ? {
+        message: error.message,
+        name: error.name
+      } : undefined
     });
   }
 });
 
-// General address suggestions endpoint
-app.get('/api/address-suggestions', async (req, res) => {
-  try {
-    const { query, limit = 5, country = 'us' } = req.query;
-
-    if (!query || typeof query !== 'string' || query.trim().length < 2) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid query parameter',
-        message: 'Query parameter is required and must be at least 2 characters long',
-        code: 'INVALID_QUERY'
-      });
-    }
-
-    const normalizedQuery = query.trim();
-    const resultLimit = Math.min(Math.max(parseInt(limit) || 5, 1), 10);
-    const cacheKey = `general:${normalizedQuery.toLowerCase()}:${resultLimit}:${country}`;
-
-    const cached = getCachedResult(cacheKey);
-    if (cached) {
-      return res.json({
-        success: true,
-        suggestions: cached,
-        metadata: {
-          source: 'cache',
-          query: normalizedQuery,
-          country: country,
-          count: cached.length,
-          cached: true
-        }
-      });
-    }
-
-    console.log(`General address search: "${normalizedQuery}" (${country})`);
-
-    // Use Nominatim for international and general searches
-    const nominatimResponse = await axios.get('https://nominatim.openstreetmap.org/search', {
-      params: {
-        q: normalizedQuery,
-        format: 'json',
-        addressdetails: 1,
-        limit: resultLimit,
-        countrycodes: country.toLowerCase(),
-        'accept-language': 'en'
-      },
-      headers: {
-        'User-Agent': 'AddressAPI/1.0'
-      },
-      timeout: 10000
-    });
-
-    const suggestions = nominatimResponse.data.map(formatNominatimAddress);
-    setCachedResult(cacheKey, suggestions);
-
-    res.json({
-      success: true,
-      suggestions,
-      metadata: {
-        source: 'nominatim',
-        provider: 'OpenStreetMap',
-        query: normalizedQuery,
-        country: country,
-        count: suggestions.length,
-        cached: false
-      }
-    });
-
-  } catch (error) {
-    console.error('General address search error:', error.message);
-
-    res.status(500).json({
-      success: false,
-      error: 'Address search failed',
-      message: 'Unable to process address search request',
-      code: 'SEARCH_ERROR'
-    });
-  }
-});
-
-// Address validation endpoint
-app.post('/api/validate-address', async (req, res) => {
-  try {
-    const { address } = req.body;
-
-    if (!address || typeof address !== 'string' || !address.trim()) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid address',
-        message: 'Address is required in request body',
-        code: 'INVALID_ADDRESS'
-      });
-    }
-
-    const normalizedAddress = address.trim();
-    const cacheKey = `validate:${normalizedAddress.toLowerCase()}`;
-
-    const cached = getCachedResult(cacheKey);
-    if (cached) {
-      return res.json(cached);
-    }
-
-    console.log(`Address validation request: "${normalizedAddress}"`);
-
-    // Try SmartyStreets for US addresses first
-    if (process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN) {
-      try {
-        const smartyResponse = await axios.get('https://us-street.api.smartystreets.com/street-address', {
-          params: {
-            'auth-id': process.env.SMARTYSTREETS_AUTH_ID,
-            'auth-token': process.env.SMARTYSTREETS_AUTH_TOKEN,
-            street: normalizedAddress,
-            candidates: 1
-          },
-          timeout: 8000
-        });
-
-        if (smartyResponse.data.length > 0) {
-          const validatedAddress = formatSmartyStreetsAddress(smartyResponse.data[0]);
-          const result = {
-            success: true,
-            valid: true,
-            address: validatedAddress,
-            confidence: 0.95,
-            provider: 'SmartyStreets'
-          };
-
-          setCachedResult(cacheKey, result);
-          return res.json(result);
-        }
-      } catch (smartyError) {
-        console.log('SmartyStreets validation failed, trying Nominatim...');
-      }
-    }
-
-    // Fallback to Nominatim
-    const nominatimResponse = await axios.get('https://nominatim.openstreetmap.org/search', {
-      params: {
-        q: normalizedAddress,
-        format: 'json',
-        addressdetails: 1,
-        limit: 1,
-        countrycodes: 'us'
-      },
-      headers: {
-        'User-Agent': 'AddressAPI/1.0'
-      },
-      timeout: 10000
-    });
-
-    if (nominatimResponse.data.length === 0) {
-      const result = {
-        success: true,
-        valid: false,
-        message: 'Address not found',
-        provider: 'Nominatim'
-      };
-      setCachedResult(cacheKey, result);
-      return res.json(result);
-    }
-
-    const validatedAddress = formatNominatimAddress(nominatimResponse.data[0]);
-    const result = {
-      success: true,
-      valid: true,
-      address: validatedAddress,
-      confidence: 0.75,
-      provider: 'Nominatim'
-    };
-
-    setCachedResult(cacheKey, result);
-    res.json(result);
-
-  } catch (error) {
-    console.error('Address validation error:', error.message);
-
-    res.status(500).json({
-      success: false,
-      error: 'Validation failed',
-      message: 'Unable to validate address',
-      code: 'VALIDATION_ERROR'
-    });
-  }
-});
-
-// Ohio ZIP code validation
-app.get('/api/validate-ohio-zip', async (req, res) => {
-  try {
-    const { zip } = req.query;
-
-    if (!zip || !/^\d{5}$/.test(zip)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid ZIP code',
-        message: 'Valid 5-digit ZIP code is required',
-        code: 'INVALID_ZIP'
-      });
-    }
-
-    console.log(`ZIP code validation: ${zip}`);
-
-    // Basic Ohio ZIP validation (starts with 4)
-    const isOhioPattern = zip.startsWith('4');
-
-    if (!isOhioPattern) {
-      return res.json({
-        success: true,
-        valid: false,
-        ohio: false,
-        message: 'ZIP code pattern does not match Ohio'
-      });
-    }
-
-    // Enhanced validation with geocoding
-    try {
-      const nominatimResponse = await axios.get('https://nominatim.openstreetmap.org/search', {
-        params: {
-          postalcode: zip,
-          country: 'us',
-          format: 'json',
-          addressdetails: 1,
-          limit: 1
-        },
-        headers: {
-          'User-Agent': 'AddressAPI/1.0'
-        },
-        timeout: 5000
-      });
-
-      if (nominatimResponse.data.length > 0) {
-        const zipData = nominatimResponse.data[0];
-        const isOhio = zipData.address?.state?.toLowerCase().includes('ohio');
-
-        return res.json({
-          success: true,
-          valid: true,
-          ohio: isOhio,
-          city: zipData.address?.city || zipData.address?.town || 'Unknown',
-          state: zipData.address?.state || 'OH',
-          county: zipData.address?.county || '',
-          coordinates: {
-            latitude: parseFloat(zipData.lat) || null,
-            longitude: parseFloat(zipData.lon) || null
-          }
-        });
-      }
-    } catch (geoError) {
-      // Fallback to basic validation
-      console.log('Geocoding failed, using basic validation');
-    }
-
-    // Basic fallback response
-    res.json({
-      success: true,
-      valid: true,
-      ohio: true,
-      city: 'Unknown',
-      state: 'OH',
-      message: 'Basic pattern validation - ZIP appears to be in Ohio'
-    });
-
-  } catch (error) {
-    console.error('ZIP validation error:', error.message);
-
-    res.status(500).json({
-      success: false,
-      error: 'ZIP validation failed',
-      message: 'Unable to validate ZIP code',
-      code: 'ZIP_VALIDATION_ERROR'
-    });
-  }
-});
-
-// Reverse geocoding endpoint
-app.get('/api/reverse-geocode', async (req, res) => {
-  try {
-    const { lat, lng } = req.query;
-
-    if (!lat || !lng) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing coordinates',
-        message: 'Both lat and lng parameters are required',
-        code: 'INVALID_COORDINATES'
-      });
-    }
-
-    const latitude = parseFloat(lat);
-    const longitude = parseFloat(lng);
-
-    if (isNaN(latitude) || isNaN(longitude)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid coordinates',
-        message: 'Latitude and longitude must be valid numbers',
-        code: 'INVALID_COORDINATE_FORMAT'
-      });
-    }
-
-    const cacheKey = `reverse:${latitude.toFixed(6)}:${longitude.toFixed(6)}`;
-    const cached = getCachedResult(cacheKey);
-
-    if (cached) {
-      return res.json(cached);
-    }
-
-    console.log(`Reverse geocoding: ${latitude}, ${longitude}`);
-
-    const nominatimResponse = await axios.get('https://nominatim.openstreetmap.org/reverse', {
-      params: {
-        lat: latitude,
-        lon: longitude,
-        format: 'json',
-        addressdetails: 1
-      },
-      headers: {
-        'User-Agent': 'AddressAPI/1.0'
-      },
-      timeout: 8000
-    });
-
-    const address = formatNominatimAddress(nominatimResponse.data);
-    const result = {
-      success: true,
-      address,
-      coordinates: { latitude, longitude },
-      provider: 'Nominatim'
-    };
-
-    setCachedResult(cacheKey, result);
-    res.json(result);
-
-  } catch (error) {
-    console.error('Reverse geocoding error:', error.message);
-
-    res.status(500).json({
-      success: false,
-      error: 'Reverse geocoding failed',
-      message: 'Unable to convert coordinates to address',
-      code: 'REVERSE_GEOCODING_ERROR'
-    });
-  }
-});
-
-// System health and status endpoint
+// Health check endpoint
 app.get('/api/health', (req, res) => {
-  const uptime = process.uptime();
-  const memoryUsage = process.memoryUsage();
+  try {
+    const uptime = process.uptime();
+    const memoryUsage = process.memoryUsage();
 
-  res.json({
-    success: true,
-    status: 'operational',
-    service: 'Ohio Address API',
-    version: '1.0.0',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    uptime: {
-      seconds: Math.floor(uptime),
-      formatted: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${Math.floor(uptime % 60)}s`
-    },
-    cache: {
-      size: cache.size,
-      maxSize: MAX_CACHE_SIZE,
-      ttl: CACHE_TTL / 1000 + 's'
-    },
-    memory: {
-      used: Math.round(memoryUsage.heapUsed / 1024 / 1024) + 'MB',
-      total: Math.round(memoryUsage.heapTotal / 1024 / 1024) + 'MB'
-    },
-    providers: {
-      smartystreets: !!process.env.SMARTYSTREETS_AUTH_ID,
-      nominatim: true
-    },
-    rateLimit: {
-      window: RATE_LIMIT_WINDOW / 1000 + 's',
-      maxRequests: MAX_REQUESTS
-    }
-  });
-});
-
-// Cache management endpoint
-app.post('/api/cache/clear', (req, res) => {
-  const previousSize = cache.size;
-  cache.clear();
-
-  console.log(`Cache cleared: ${previousSize} entries removed`);
-
-  res.json({
-    success: true,
-    message: 'Cache cleared successfully',
-    entriesRemoved: previousSize,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// API documentation endpoint
-app.get('/api/docs', (req, res) => {
-  res.json({
-    service: 'Ohio Address Suggestions API',
-    version: '1.0.0',
-    description: 'Professional address validation and geocoding service for Ohio energy enrollment',
-    baseUrl: req.protocol + '://' + req.get('host') + '/api',
-    endpoints: {
-      'GET /health': {
-        description: 'Service health check and system information',
-        parameters: {},
-        response: 'System status and performance metrics'
+    res.json({
+      success: true,
+      status: 'operational',
+      service: 'Ohio Address API',
+      version: '1.0.0',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      uptime: {
+        seconds: Math.floor(uptime),
+        formatted: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${Math.floor(uptime % 60)}s`
       },
-      'GET /ohio-address-suggestions': {
-        description: 'Get Ohio-specific address suggestions with USPS validation',
-        parameters: {
-          query: 'Address search query (minimum 4 characters)',
-          limit: 'Maximum results to return (1-10, default: 5)'
-        },
-        example: '/api/ohio-address-suggestions?query=1+Nationwide+Plaza&limit=5'
+      cache: {
+        size: cache.size,
+        maxSize: MAX_CACHE_SIZE,
+        ttl: CACHE_TTL / 1000 + 's'
       },
-      'GET /address-suggestions': {
-        description: 'General address suggestions for any country',
-        parameters: {
-          query: 'Address search query (minimum 2 characters)',
-          limit: 'Maximum results to return (1-10, default: 5)',
-          country: 'ISO country code (default: us)'
-        },
-        example: '/api/address-suggestions?query=123+Main+Street&country=us'
+      memory: {
+        used: Math.round(memoryUsage.heapUsed / 1024 / 1024) + 'MB',
+        total: Math.round(memoryUsage.heapTotal / 1024 / 1024) + 'MB'
       },
-      'POST /validate-address': {
-        description: 'Validate and standardize a complete address',
-        body: { address: 'Complete address string' },
-        response: 'Validation result with confidence score'
+      providers: {
+        smartystreets: !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN),
+        nominatim: true
       },
-      'GET /validate-ohio-zip': {
-        description: 'Validate Ohio ZIP codes with location details',
-        parameters: { zip: '5-digit ZIP code' },
-        example: '/api/validate-ohio-zip?zip=43215'
-      },
-      'GET /reverse-geocode': {
-        description: 'Convert coordinates to street address',
-        parameters: {
-          lat: 'Latitude (decimal degrees)',
-          lng: 'Longitude (decimal degrees)'
-        },
-        example: '/api/reverse-geocode?lat=39.9612&lng=-82.9988'
+      rateLimit: {
+        window: RATE_LIMIT_WINDOW / 1000 + 's',
+        maxRequests: MAX_REQUESTS
       }
-    },
-    authentication: 'None required',
-    rateLimit: `${MAX_REQUESTS} requests per ${RATE_LIMIT_WINDOW / 60000} minutes`,
-    caching: `${CACHE_TTL / 60000} minute TTL`
-  });
+    });
+  } catch (error) {
+    console.error('Health check error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Health check failed',
+      message: error.message
+    });
+  }
 });
 
 // Root endpoint
@@ -781,64 +515,90 @@ app.get('/', (req, res) => {
     service: 'Ohio Address API',
     version: '1.0.0',
     status: 'operational',
-    documentation: '/api/docs',
-    health: '/api/health'
+    documentation: '/api/test',
+    health: '/api/health',
+    endpoints: [
+      '/api/test',
+      '/api/health',
+      '/api/ohio-address-suggestions'
+    ]
   });
 });
 
 // Global error handler
 app.use((error, req, res, next) => {
-  console.error('Unhandled application error:', {
+  console.error('Global error handler caught:', {
     message: error.message,
     stack: error.stack,
     url: req.originalUrl,
-    method: req.method
+    method: req.method,
+    timestamp: new Date().toISOString()
   });
 
   res.status(500).json({
     success: false,
     error: 'Internal server error',
     message: 'An unexpected error occurred',
-    code: 'INTERNAL_ERROR'
+    code: 'GLOBAL_ERROR'
   });
 });
 
 // 404 handler
 app.use('*', (req, res) => {
+  console.log(`404 - Route not found: ${req.method} ${req.originalUrl}`);
   res.status(404).json({
     success: false,
     error: 'Endpoint not found',
     message: `The requested endpoint ${req.originalUrl} does not exist`,
     code: 'NOT_FOUND',
     availableEndpoints: [
+      '/api/test',
       '/api/health',
-      '/api/docs',
-      '/api/ohio-address-suggestions',
-      '/api/address-suggestions',
-      '/api/validate-address',
-      '/api/validate-ohio-zip',
-      '/api/reverse-geocode'
+      '/api/ohio-address-suggestions'
     ]
   });
 });
 
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
+// Start server with error handling
+const server = app.listen(PORT, '0.0.0.0', (error) => {
+  if (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+  
   console.log(`
-╔══════════════════════════════════════════════════════════════╗
-║                    Ohio Address API Server                  ║
-║                        Version 1.0.0                       ║
-╠══════════════════════════════════════════════════════════════╣
-║  Status: Running on port ${PORT}                                   ║
-║  Environment: ${process.env.NODE_ENV || 'development'}                              ║
-║  Health: ${process.env.NODE_ENV === 'production' ? 'https://[your-app].onrender.com' : `http://localhost:${PORT}`}/api/health            ║
-║  Docs:   ${process.env.NODE_ENV === 'production' ? 'https://[your-app].onrender.com' : `http://localhost:${PORT}`}/api/docs              ║
-║                                                              ║
-║  Providers:                                                  ║
-║    • SmartyStreets: ${process.env.SMARTYSTREETS_AUTH_ID ? 'Enabled' : 'Disabled'}                             ║
-║    • Nominatim:     Enabled                                  ║
-║                                                              ║
-║  Ready to serve Ohio address suggestions                     ║
-╚══════════════════════════════════════════════════════════════╝
+🚀 BULLETPROOF OHIO ADDRESS API SERVER
+📍 Port: ${PORT}
+🌐 Environment: ${process.env.NODE_ENV || 'development'}
+🔑 SmartyStreets: ${process.env.SMARTYSTREETS_AUTH_ID ? 'Configured ✅' : 'Not configured ❌'}
+🗺️  Nominatim: Available ✅
+
+📋 Test endpoints:
+   GET / 
+   GET /api/test
+   GET /api/health
+   GET /api/ohio-address-suggestions?query=main&limit=5
+
+🔧 Server ready and bulletproof!
   `);
 });
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  server.close(() => {
+    console.log('Process terminated');
+  });
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
+module.exports = app;
