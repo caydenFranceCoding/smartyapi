@@ -60,14 +60,20 @@ app.use(cors({
       'https://app.hubspot.com',
       'https://localhost:3000',
       'http://localhost:3000',
-      // Add your production domains
+      'https://wattkarma.com',              
+      'https://wattkarma.com/ohioinfo',     
       process.env.FRONTEND_URL,
       /^https:\/\/.*\.hubspot\.com$/,
-      /^https:\/\/.*\.hubspotpreview-na1\.com$/
+      /^https:\/\/.*\.hubspotpreview-na1\.com$/,
+      /^https:\/\/.*\.wattkarma\.com$/    
     ].filter(Boolean);
     
     const isAllowed = allowedOrigins.some(allowed => {
-      if (typeof allowed === 'string') return allowed === origin;
+      if (typeof allowed === 'string') {
+        // For string origins, check if the origin starts with the allowed origin
+        // This handles both exact matches and path-based origins
+        return origin === allowed || origin.startsWith(allowed);
+      }
       if (allowed instanceof RegExp) return allowed.test(origin);
       return false;
     });
