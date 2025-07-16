@@ -149,6 +149,32 @@ app.use(express.urlencoded({
 }));
 
 // Production-grade rate limiting
+// Redis store for rate limiting (optional)
+let redisStore;
+if (process.env.REDIS_URL && isProduction) {
+  try {
+    const { createClient } = require('redis');
+    const RedisStore = require('rate-limit-redis');
+    
+    const redisClient = createClient({
+      url: process.env.REDIS_URL,
+      socket: { connectTimeout: 5000 }
+    });
+    
+    redisClient.on('error', (err) => {
+      console.error('Redis error:', err);
+    });
+    
+    redisStore = new RedisStore({
+      sendCommand: (...args) => redisClient.sendCommand(args),
+    });
+    
+    console.log('✅ Redis rate limiting enabled');
+  } catch (error) {
+    console.warn('⚠️  Redis setup failed, using memory store:', error.message);
+  }
+}
+
 const limiter = rateLimit({
   windowMs: CONFIG.RATE_LIMIT_WINDOW,
   max: CONFIG.MAX_REQUESTS_PER_WINDOW,
@@ -159,8 +185,7 @@ const limiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  // Use Redis in production if available
-  store: process.env.REDIS_URL ? undefined : undefined, // Would use redis store here
+  store: redisStore, // Uses Redis if available, otherwise memory
   skip: (req) => {
     // Skip rate limiting for health checks
     return req.path === '/api/health' || req.path === '/api/ping';
