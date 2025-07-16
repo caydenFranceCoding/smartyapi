@@ -1,40 +1,49 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const cluster = require('cluster');
 const os = require('os');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const isProduction = process.env.NODE_ENV === 'production';
 
-// Production configuration
-const PRODUCTION_CONFIG = {
+// Production vs Development Configuration
+const CONFIG = {
   // Cache settings
-  CACHE_TTL: 24 * 60 * 60 * 1000, // 24 hours for production
-  MAX_CACHE_SIZE: 10000, // Increased for production
+  CACHE_TTL: isProduction ? 24 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000,
+  MAX_CACHE_SIZE: isProduction ? 5000 : 1000,
   
-  // Rate limiting (per hour for production scale)
-  RATE_LIMIT_WINDOW: 60 * 60 * 1000, // 1 hour
-  MAX_REQUESTS_PER_HOUR: 1000, // 1000 requests per hour per IP
+  // Rate limiting
+  RATE_LIMIT_WINDOW: isProduction ? 60 * 60 * 1000 : 15 * 60 * 1000, // 1 hour vs 15 min
+  MAX_REQUESTS_PER_WINDOW: isProduction ? 1000 : 100,
   
   // API timeouts
-  SMARTYSTREETS_TIMEOUT: 5000, // Faster timeout for production
-  NOMINATIM_TIMEOUT: 8000,
+  SMARTYSTREETS_TIMEOUT: isProduction ? 8000 : 3000,
+  NOMINATIM_TIMEOUT: isProduction ? 10000 : 4000,
   
   // Retry settings
-  MAX_RETRIES: 2,
-  RETRY_DELAY: 1000,
+  MAX_RETRIES: isProduction ? 3 : 1,
+  RETRY_DELAY: isProduction ? 1000 : 500,
   
-  // Logging
-  ENABLE_REQUEST_LOGGING: process.env.NODE_ENV === 'production'
+  // Keep-alive (only for free tier)
+  KEEP_ALIVE_INTERVAL: isProduction ? null : 14 * 60 * 1000,
+  
+  // Security
+  ENABLE_CLUSTERING: isProduction,
+  ENABLE_COMPRESSION: isProduction,
+  ENABLE_DETAILED_LOGGING: isProduction,
+  TRUST_PROXY: isProduction
 };
 
-// Enable clustering for production
-if (process.env.NODE_ENV === 'production' && cluster.isMaster) {
-  const numCPUs = Math.min(os.cpus().length, 4); // Max 4 workers for cost efficiency
-  
-  console.log(`🚀 Master process ${process.pid} starting ${numCPUs} workers`);
+// Clustering for production
+if (CONFIG.ENABLE_CLUSTERING && cluster.isMaster) {
+  const numCPUs = Math.min(os.cpus().length, 4);
+  console.log(`🚀 Master ${process.pid} starting ${numCPUs} workers`);
   
   for (let i = 0; i < numCPUs; i++) {
     cluster.fork();
@@ -45,36 +54,72 @@ if (process.env.NODE_ENV === 'production' && cluster.isMaster) {
     cluster.fork();
   });
   
-  return; // Exit master process
+  return;
 }
 
-// Worker process continues here
-app.set('trust proxy', true);
+// Security middleware for production
+if (isProduction) {
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "https:"],
+      },
+    },
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true
+    }
+  }));
+}
+
+// Compression for production
+if (CONFIG.ENABLE_COMPRESSION) {
+  app.use(compression());
+}
+
+// Trust proxy setting
+if (CONFIG.TRUST_PROXY) {
+  app.set('trust proxy', true);
+}
 
 // Enhanced CORS for production
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
     
+    // Production whitelist
     const allowedOrigins = [
       'https://app.hubspot.com',
-      'https://localhost:3000',
-      'http://localhost:3000',
-      'https://wattkarma.com',              
-      'https://wattkarma.com/ohioinfo',     
+      'https://wattkarma.com',
+      'https://www.wattkarma.com',
       process.env.FRONTEND_URL,
+      process.env.CLIENT_URL,
+      // Regex patterns for subdomains
       /^https:\/\/.*\.hubspot\.com$/,
       /^https:\/\/.*\.hubspotpreview-na1\.com$/,
-      /^https:\/\/.*\.wattkarma\.com$/    
+      /^https:\/\/.*\.wattkarma\.com$/
     ].filter(Boolean);
+    
+    // Development: allow localhost
+    if (!isProduction) {
+      allowedOrigins.push(
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'http://127.0.0.1:3000'
+      );
+    }
     
     const isAllowed = allowedOrigins.some(allowed => {
       if (typeof allowed === 'string') {
-        // For string origins, check if the origin starts with the allowed origin
-        // This handles both exact matches and path-based origins
         return origin === allowed || origin.startsWith(allowed);
       }
-      if (allowed instanceof RegExp) return allowed.test(origin);
+      if (allowed instanceof RegExp) {
+        return allowed.test(origin);
+      }
       return false;
     });
     
@@ -82,183 +127,158 @@ app.use(cors({
       return callback(null, true);
     }
     
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('Allowing origin for development:', origin);
-      return callback(null, true);
+    // Log rejected origins in production
+    if (isProduction) {
+      console.warn(`CORS rejected origin: ${origin}`);
     }
     
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
-  maxAge: 86400 // Cache preflight for 24 hours
+  maxAge: isProduction ? 86400 : 3600 // Cache preflight longer in production
 }));
 
-app.use(express.json({ limit: '1mb' })); // Reduced limit for production
-app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+// Body parsing with appropriate limits
+app.use(express.json({ 
+  limit: isProduction ? '1mb' : '100kb',
+  type: ['application/json', 'text/plain']
+}));
+app.use(express.urlencoded({ 
+  extended: true, 
+  limit: isProduction ? '1mb' : '100kb' 
+}));
 
-// Production-grade rate limiting with Redis-like structure
-class ProductionRateLimit {
-  constructor() {
-    this.store = new Map();
-    this.cleanupInterval = setInterval(() => this.cleanup(), 5 * 60 * 1000); // Cleanup every 5 minutes
+// Production-grade rate limiting
+const limiter = rateLimit({
+  windowMs: CONFIG.RATE_LIMIT_WINDOW,
+  max: CONFIG.MAX_REQUESTS_PER_WINDOW,
+  message: {
+    success: false,
+    error: 'Too many requests',
+    retryAfter: CONFIG.RATE_LIMIT_WINDOW / 1000
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Use Redis in production if available
+  store: process.env.REDIS_URL ? undefined : undefined, // Would use redis store here
+  skip: (req) => {
+    // Skip rate limiting for health checks
+    return req.path === '/api/health' || req.path === '/api/ping';
   }
-  
-  cleanup() {
-    const now = Date.now();
-    for (const [key, data] of this.store.entries()) {
-      if (now > data.resetTime) {
-        this.store.delete(key);
-      }
-    }
-  }
-  
-  checkLimit(clientIP) {
-    const now = Date.now();
-    const key = `rate_limit:${clientIP}`;
-    
-    if (!this.store.has(key)) {
-      this.store.set(key, {
-        count: 1,
-        resetTime: now + PRODUCTION_CONFIG.RATE_LIMIT_WINDOW
-      });
-      return { allowed: true, remaining: PRODUCTION_CONFIG.MAX_REQUESTS_PER_HOUR - 1 };
-    }
-    
-    const data = this.store.get(key);
-    
-    if (now > data.resetTime) {
-      data.count = 1;
-      data.resetTime = now + PRODUCTION_CONFIG.RATE_LIMIT_WINDOW;
-      return { allowed: true, remaining: PRODUCTION_CONFIG.MAX_REQUESTS_PER_HOUR - 1 };
-    }
-    
-    if (data.count >= PRODUCTION_CONFIG.MAX_REQUESTS_PER_HOUR) {
-      return {
-        allowed: false,
-        remaining: 0,
-        retryAfter: Math.ceil((data.resetTime - now) / 1000)
-      };
-    }
-    
-    data.count++;
-    return {
-      allowed: true,
-      remaining: PRODUCTION_CONFIG.MAX_REQUESTS_PER_HOUR - data.count
-    };
-  }
-}
+});
 
-const rateLimiter = new ProductionRateLimit();
+app.use('/api/', limiter);
 
-function productionRateLimit(req, res, next) {
-  const clientIP = req.ip || req.connection?.remoteAddress || 'unknown';
-  const result = rateLimiter.checkLimit(clientIP);
-  
-  // Add rate limit headers
-  res.set({
-    'X-RateLimit-Limit': PRODUCTION_CONFIG.MAX_REQUESTS_PER_HOUR,
-    'X-RateLimit-Remaining': result.remaining,
-    'X-RateLimit-Reset': new Date(Date.now() + PRODUCTION_CONFIG.RATE_LIMIT_WINDOW).toISOString()
-  });
-  
-  if (!result.allowed) {
-    return res.status(429).json({
-      success: false,
-      error: 'Rate limit exceeded',
-      message: `Maximum ${PRODUCTION_CONFIG.MAX_REQUESTS_PER_HOUR} requests per hour exceeded`,
-      retryAfter: result.retryAfter,
-      code: 'RATE_LIMIT_EXCEEDED'
-    });
-  }
-  
-  next();
-}
-
-app.use('/api/', productionRateLimit);
-
-// Production-grade caching with TTL and size management
+// Production cache with better memory management
 class ProductionCache {
   constructor() {
     this.store = new Map();
-    this.accessOrder = new Map(); // For LRU eviction
-    this.cleanupInterval = setInterval(() => this.cleanup(), 10 * 60 * 1000); // Cleanup every 10 minutes
+    this.accessTimes = new Map();
+    this.stats = {
+      hits: 0,
+      misses: 0,
+      evictions: 0
+    };
+    
+    // Cleanup interval based on environment
+    const cleanupInterval = isProduction ? 10 * 60 * 1000 : 30 * 60 * 1000;
+    this.cleanupTimer = setInterval(() => this.cleanup(), cleanupInterval);
   }
   
   cleanup() {
     const now = Date.now();
     let cleaned = 0;
     
+    // Remove expired entries
     for (const [key, data] of this.store.entries()) {
-      if (now - data.timestamp > PRODUCTION_CONFIG.CACHE_TTL) {
+      if (now - data.timestamp > CONFIG.CACHE_TTL) {
         this.store.delete(key);
-        this.accessOrder.delete(key);
+        this.accessTimes.delete(key);
         cleaned++;
       }
     }
     
-    // LRU eviction if still too large
-    if (this.store.size > PRODUCTION_CONFIG.MAX_CACHE_SIZE) {
-      const sortedByAccess = Array.from(this.accessOrder.entries())
+    // LRU eviction if over capacity
+    if (this.store.size > CONFIG.MAX_CACHE_SIZE) {
+      const sortedByAccess = Array.from(this.accessTimes.entries())
         .sort((a, b) => a[1] - b[1])
-        .slice(0, this.store.size - PRODUCTION_CONFIG.MAX_CACHE_SIZE);
+        .slice(0, this.store.size - CONFIG.MAX_CACHE_SIZE);
       
       for (const [key] of sortedByAccess) {
         this.store.delete(key);
-        this.accessOrder.delete(key);
+        this.accessTimes.delete(key);
+        this.stats.evictions++;
       }
     }
     
-    if (cleaned > 0) {
+    if (cleaned > 0 && CONFIG.ENABLE_DETAILED_LOGGING) {
       console.log(`Cache cleanup: removed ${cleaned} expired entries`);
     }
   }
   
   get(key) {
     const data = this.store.get(key);
-    if (!data) return null;
-    
-    const now = Date.now();
-    if (now - data.timestamp > PRODUCTION_CONFIG.CACHE_TTL) {
-      this.store.delete(key);
-      this.accessOrder.delete(key);
+    if (!data) {
+      this.stats.misses++;
       return null;
     }
     
-    this.accessOrder.set(key, now); // Update access time
+    const now = Date.now();
+    if (now - data.timestamp > CONFIG.CACHE_TTL) {
+      this.store.delete(key);
+      this.accessTimes.delete(key);
+      this.stats.misses++;
+      return null;
+    }
+    
+    this.accessTimes.set(key, now);
+    this.stats.hits++;
     return data.value;
   }
   
   set(key, value) {
     const now = Date.now();
     
-    // Evict oldest if at capacity
-    if (this.store.size >= PRODUCTION_CONFIG.MAX_CACHE_SIZE && !this.store.has(key)) {
-      const oldestKey = Array.from(this.accessOrder.entries())
+    // Pre-evict if at capacity
+    if (this.store.size >= CONFIG.MAX_CACHE_SIZE && !this.store.has(key)) {
+      const oldestKey = Array.from(this.accessTimes.entries())
         .sort((a, b) => a[1] - b[1])[0]?.[0];
       
       if (oldestKey) {
         this.store.delete(oldestKey);
-        this.accessOrder.delete(oldestKey);
+        this.accessTimes.delete(oldestKey);
+        this.stats.evictions++;
       }
     }
     
     this.store.set(key, { value, timestamp: now });
-    this.accessOrder.set(key, now);
+    this.accessTimes.set(key, now);
   }
   
   getStats() {
+    const hitRate = this.stats.hits + this.stats.misses > 0 
+      ? (this.stats.hits / (this.stats.hits + this.stats.misses) * 100).toFixed(1)
+      : '0.0';
+    
     return {
       size: this.store.size,
-      maxSize: PRODUCTION_CONFIG.MAX_CACHE_SIZE,
-      ttl: PRODUCTION_CONFIG.CACHE_TTL / 1000 + 's'
+      maxSize: CONFIG.MAX_CACHE_SIZE,
+      hitRate: `${hitRate}%`,
+      ...this.stats
     };
+  }
+  
+  destroy() {
+    clearInterval(this.cleanupTimer);
+    this.store.clear();
+    this.accessTimes.clear();
   }
 }
 
 const cache = new ProductionCache();
 
-// Async retry utility
-async function retryAsync(fn, maxRetries = PRODUCTION_CONFIG.MAX_RETRIES) {
+// Enhanced retry with exponential backoff
+async function retryWithBackoff(fn, maxRetries = CONFIG.MAX_RETRIES) {
   let lastError;
   
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
@@ -268,8 +288,7 @@ async function retryAsync(fn, maxRetries = PRODUCTION_CONFIG.MAX_RETRIES) {
       lastError = error;
       
       if (attempt <= maxRetries) {
-        const delay = PRODUCTION_CONFIG.RETRY_DELAY * attempt;
-        console.log(`Attempt ${attempt} failed, retrying in ${delay}ms...`);
+        const delay = CONFIG.RETRY_DELAY * Math.pow(2, attempt - 1); // Exponential backoff
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -278,88 +297,45 @@ async function retryAsync(fn, maxRetries = PRODUCTION_CONFIG.MAX_RETRIES) {
   throw lastError;
 }
 
-// Enhanced address formatting with validation
-function formatSmartyStreetsAddress(addressData) {
-  try {
-    if (!addressData?.components) return null;
-    
-    const address = (addressData.delivery_line_1 || '').trim();
-    if (!address) return null; // Skip if no street address
-    
-    return {
-      address: address + (addressData.delivery_line_2 ? ` ${addressData.delivery_line_2.trim()}` : ''),
-      city: (addressData.components.city_name || '').trim(),
-      state: addressData.components.state_abbreviation || 'OH',
-      zipcode: (addressData.components.zipcode || '').trim(),
-      verified: true,
-      source: 'smartystreets'
-    };
-  } catch (error) {
-    console.error('Error formatting SmartyStreets address:', error);
-    return null;
+// Pre-configured axios instances with production settings
+const smartyAxios = axios.create({
+  baseURL: 'https://us-street.api.smartystreets.com',
+  timeout: CONFIG.SMARTYSTREETS_TIMEOUT,
+  headers: { 
+    'User-Agent': 'OhioEnergyAPI/2.1',
+    'Accept': 'application/json',
+    'Accept-Encoding': 'gzip, deflate'
   }
-}
+});
 
-function formatNominatimAddress(addressData) {
-  try {
-    if (!addressData?.address) return null;
-    
-    const addr = addressData.address;
-    
-    // Build street address
-    let streetAddress = '';
-    if (addr.house_number && addr.road) {
-      streetAddress = `${addr.house_number.trim()} ${addr.road.trim()}`;
-    } else if (addr.road) {
-      streetAddress = addr.road.trim();
-    } else {
-      // Fallback to display name first part
-      const displayParts = addressData.display_name?.split(',') || [];
-      streetAddress = displayParts[0]?.trim() || '';
-    }
-    
-    if (!streetAddress) return null; // Skip if no street address
-    
-    // Get city with priority order
-    const city = (addr.city || addr.town || addr.village || addr.municipality || '').trim();
-    
-    // Handle state normalization
-    let state = (addr.state || '').trim();
-    if (state.toLowerCase() === 'ohio') {
-      state = 'OH';
-    }
-    
-    return {
-      address: streetAddress,
-      city: city,
-      state: state,
-      zipcode: (addr.postcode || '').trim(),
-      verified: false,
-      source: 'nominatim'
-    };
-  } catch (error) {
-    console.error('Error formatting Nominatim address:', error);
-    return null;
+const nominatimAxios = axios.create({
+  baseURL: 'https://nominatim.openstreetmap.org',
+  timeout: CONFIG.NOMINATIM_TIMEOUT,
+  headers: { 
+    'User-Agent': 'OhioEnergyAPI/2.1',
+    'Accept': 'application/json',
+    'Accept-Encoding': 'gzip, deflate'
   }
-}
+});
 
-// Request logging for production monitoring
+// Request logging middleware for production
 function requestLogger(req, res, next) {
-  if (!PRODUCTION_CONFIG.ENABLE_REQUEST_LOGGING) return next();
+  if (!CONFIG.ENABLE_DETAILED_LOGGING) return next();
   
   const start = Date.now();
-  const clientIP = req.ip || 'unknown';
+  const { method, originalUrl, ip } = req;
   
   res.on('finish', () => {
     const duration = Date.now() - start;
     const logData = {
       timestamp: new Date().toISOString(),
-      method: req.method,
-      url: req.originalUrl,
+      method,
+      url: originalUrl,
       status: res.statusCode,
       duration: `${duration}ms`,
-      ip: clientIP,
-      userAgent: req.get('User-Agent') || 'unknown'
+      ip,
+      userAgent: req.get('User-Agent'),
+      worker: process.pid
     };
     
     console.log(JSON.stringify(logData));
@@ -370,7 +346,89 @@ function requestLogger(req, res, next) {
 
 app.use('/api/', requestLogger);
 
-// Health check with detailed metrics
+// Enhanced address formatting with validation
+function formatSmartyStreetsAddress(data) {
+  try {
+    if (!data?.components || !data.delivery_line_1?.trim()) return null;
+    
+    const address = data.delivery_line_1.trim();
+    const unit = data.delivery_line_2?.trim();
+    
+    return {
+      address: address + (unit ? ` ${unit}` : ''),
+      city: (data.components.city_name || '').trim(),
+      state: data.components.state_abbreviation || 'OH',
+      zipcode: (data.components.zipcode || '').trim(),
+      verified: true,
+      source: 'smartystreets',
+      confidence: data.analysis?.dpv_match_y ? 'high' : 'medium'
+    };
+  } catch (error) {
+    console.error('SmartyStreets formatting error:', error);
+    return null;
+  }
+}
+
+function formatNominatimAddress(data) {
+  try {
+    if (!data?.address) return null;
+    
+    const addr = data.address;
+    let streetAddress = '';
+    
+    if (addr.house_number && addr.road) {
+      streetAddress = `${addr.house_number.trim()} ${addr.road.trim()}`;
+    } else if (addr.road) {
+      streetAddress = addr.road.trim();
+    } else {
+      const displayParts = data.display_name?.split(',') || [];
+      streetAddress = displayParts[0]?.trim() || '';
+    }
+    
+    if (!streetAddress) return null;
+    
+    const city = (addr.city || addr.town || addr.village || addr.municipality || '').trim();
+    let state = (addr.state || '').trim();
+    
+    if (state.toLowerCase() === 'ohio') {
+      state = 'OH';
+    }
+    
+    return {
+      address: streetAddress,
+      city: city,
+      state: state,
+      zipcode: (addr.postcode || '').trim(),
+      verified: false,
+      source: 'nominatim',
+      confidence: 'low'
+    };
+  } catch (error) {
+    console.error('Nominatim formatting error:', error);
+    return null;
+  }
+}
+
+// Keep-alive for free tier only
+function setupKeepAlive() {
+  if (CONFIG.KEEP_ALIVE_INTERVAL && process.env.RENDER_SERVICE_URL) {
+    setInterval(async () => {
+      try {
+        await axios.get(`${process.env.RENDER_SERVICE_URL}/api/ping`, { 
+          timeout: 5000,
+          headers: { 'User-Agent': 'KeepAlive/1.0' }
+        });
+        console.log('Keep-alive ping successful');
+      } catch (error) {
+        console.log('Keep-alive ping failed:', error.message);
+      }
+    }, CONFIG.KEEP_ALIVE_INTERVAL);
+    
+    console.log('Keep-alive enabled for free tier');
+  }
+}
+
+// Comprehensive health check
 app.get('/api/health', (req, res) => {
   const uptime = process.uptime();
   const memoryUsage = process.memoryUsage();
@@ -379,57 +437,64 @@ app.get('/api/health', (req, res) => {
     success: true,
     status: 'healthy',
     service: 'Ohio Address API',
-    version: '2.0.0',
-    timestamp: new Date().toISOString(),
+    version: '2.1.0',
     environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString(),
     worker: process.pid,
     uptime: {
       seconds: Math.floor(uptime),
-      formatted: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${Math.floor(uptime % 60)}s`
+      formatted: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`
     },
-    cache: cache.getStats(),
     memory: {
       used: `${Math.round(memoryUsage.heapUsed / 1024 / 1024)}MB`,
-      total: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)}MB`,
-      external: `${Math.round(memoryUsage.external / 1024 / 1024)}MB`
+      total: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)}MB`
     },
+    cache: cache.getStats(),
     providers: {
       smartystreets: !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN),
       nominatim: true
     },
-    rateLimit: {
-      window: `${PRODUCTION_CONFIG.RATE_LIMIT_WINDOW / 1000}s`,
-      maxRequests: PRODUCTION_CONFIG.MAX_REQUESTS_PER_HOUR
+    config: {
+      clustering: CONFIG.ENABLE_CLUSTERING,
+      rateLimit: `${CONFIG.MAX_REQUESTS_PER_WINDOW}/${CONFIG.RATE_LIMIT_WINDOW / 60000}min`,
+      cacheSize: CONFIG.MAX_CACHE_SIZE
     }
   });
 });
 
-// Production-optimized address search endpoint
+// Simple ping for monitoring
+app.get('/api/ping', (req, res) => {
+  res.json({ 
+    success: true, 
+    timestamp: Date.now(),
+    worker: process.pid 
+  });
+});
+
+// Main address search endpoint
 app.get('/api/ohio-address-suggestions', async (req, res) => {
-  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  console.log(`[${requestId}] Address search started`);
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
   
   try {
     const { query, limit = 5 } = req.query;
     
-    // Input validation
-    if (!query?.trim() || query.trim().length < 2) {
+    // Enhanced input validation
+    if (!query || typeof query !== 'string' || query.trim().length < 2) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid query',
-        message: 'Query must be at least 2 characters long',
+        error: 'Invalid query parameter',
+        message: 'Query must be a string with at least 2 characters',
         code: 'INVALID_QUERY'
       });
     }
     
     const normalizedQuery = query.trim().toLowerCase();
-    const resultLimit = Math.min(Math.max(parseInt(limit) || 5, 1), 10);
+    const resultLimit = Math.min(Math.max(parseInt(limit) || 5, 1), isProduction ? 10 : 8);
     const cacheKey = `ohio_addr:${normalizedQuery}:${resultLimit}`;
     
     // Check cache first
     const cached = cache.get(cacheKey);
     if (cached) {
-      console.log(`[${requestId}] Cache hit`);
       return res.json({
         success: true,
         suggestions: cached,
@@ -437,7 +502,8 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
           source: 'cache',
           query: normalizedQuery,
           count: cached.length,
-          requestId
+          requestId,
+          cached: true
         }
       });
     }
@@ -446,34 +512,30 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
     let metadata = {
       query: normalizedQuery,
       count: 0,
-      attempts: [],
-      requestId
+      requestId,
+      cached: false,
+      providers: []
     };
     
-    // Try SmartyStreets first (if configured)
+    // Try SmartyStreets first
     const smartyConfigured = !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN);
     
     if (smartyConfigured) {
       try {
-        console.log(`[${requestId}] Attempting SmartyStreets lookup`);
-        
-        const smartyResults = await retryAsync(async () => {
-          const response = await axios.get('https://us-street.api.smartystreets.com/street-address', {
+        const response = await retryWithBackoff(() =>
+          smartyAxios.get('/street-address', {
             params: {
               'auth-id': process.env.SMARTYSTREETS_AUTH_ID,
               'auth-token': process.env.SMARTYSTREETS_AUTH_TOKEN,
               street: query.trim(),
               state: 'OH',
               candidates: resultLimit
-            },
-            timeout: PRODUCTION_CONFIG.SMARTYSTREETS_TIMEOUT,
-            headers: { 'User-Agent': 'OhioEnergyAPI/2.0' }
-          });
-          return response.data;
-        });
+            }
+          })
+        );
         
-        if (Array.isArray(smartyResults) && smartyResults.length > 0) {
-          const formatted = smartyResults
+        if (Array.isArray(response.data) && response.data.length > 0) {
+          const formatted = response.data
             .map(formatSmartyStreetsAddress)
             .filter(Boolean)
             .slice(0, resultLimit);
@@ -482,42 +544,38 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
             suggestions = formatted;
             metadata.source = 'smartystreets';
             metadata.count = formatted.length;
-            metadata.verified = true;
+            metadata.providers.push('smartystreets');
             
             cache.set(cacheKey, suggestions);
-            console.log(`[${requestId}] SmartyStreets success: ${formatted.length} results`);
             
             return res.json({ success: true, suggestions, metadata });
           }
         }
         
+        metadata.providers.push('smartystreets_no_results');
+        
       } catch (error) {
         console.error(`[${requestId}] SmartyStreets error:`, error.message);
-        metadata.attempts.push(`smartystreets_error: ${error.message}`);
+        metadata.providers.push(`smartystreets_error`);
       }
     }
     
     // Fallback to Nominatim
     try {
-      console.log(`[${requestId}] Attempting Nominatim lookup`);
-      
-      const nominatimResults = await retryAsync(async () => {
-        const response = await axios.get('https://nominatim.openstreetmap.org/search', {
+      const response = await retryWithBackoff(() =>
+        nominatimAxios.get('/search', {
           params: {
             q: `${query.trim()}, Ohio, USA`,
             format: 'json',
             addressdetails: 1,
-            limit: resultLimit,
+            limit: resultLimit + 2, // Get a few extra to filter
             countrycodes: 'us'
-          },
-          timeout: PRODUCTION_CONFIG.NOMINATIM_TIMEOUT,
-          headers: { 'User-Agent': 'OhioEnergyAPI/2.0' }
-        });
-        return response.data;
-      });
+          }
+        })
+      );
       
-      if (Array.isArray(nominatimResults) && nominatimResults.length > 0) {
-        const ohioAddresses = nominatimResults
+      if (Array.isArray(response.data) && response.data.length > 0) {
+        const ohioAddresses = response.data
           .filter(addr => {
             const state = addr.address?.state?.toLowerCase();
             return state && (state.includes('ohio') || state === 'oh');
@@ -529,21 +587,19 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
         suggestions = ohioAddresses;
         metadata.source = 'nominatim';
         metadata.count = ohioAddresses.length;
-        metadata.verified = false;
+        metadata.providers.push('nominatim');
         
         if (ohioAddresses.length > 0) {
           cache.set(cacheKey, suggestions);
         }
-        
-        console.log(`[${requestId}] Nominatim success: ${ohioAddresses.length} results`);
+      } else {
+        metadata.providers.push('nominatim_no_results');
       }
       
     } catch (error) {
       console.error(`[${requestId}] Nominatim error:`, error.message);
-      metadata.attempts.push(`nominatim_error: ${error.message}`);
+      metadata.providers.push('nominatim_error');
     }
-    
-    console.log(`[${requestId}] Final result: ${suggestions.length} suggestions`);
     
     res.json({
       success: true,
@@ -557,24 +613,30 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
       success: false,
       error: 'Internal server error',
       message: 'Address search failed',
-      code: 'INTERNAL_ERROR'
+      code: 'INTERNAL_ERROR',
+      requestId
     });
   }
 });
 
-// Test endpoint
-app.get('/api/test', (req, res) => {
+// API documentation endpoint
+app.get('/api/docs', (req, res) => {
   res.json({
-    success: true,
-    message: 'Production Ohio Address API',
-    version: '2.0.0',
-    timestamp: new Date().toISOString(),
-    worker: process.pid,
-    environment: process.env.NODE_ENV || 'development',
-    config: {
-      smartystreets: !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN),
-      cacheSize: cache.getStats().size,
-      rateLimit: `${PRODUCTION_CONFIG.MAX_REQUESTS_PER_HOUR}/hour`
+    service: 'Ohio Address API',
+    version: '2.1.0',
+    documentation: {
+      endpoints: {
+        'GET /api/ohio-address-suggestions': {
+          description: 'Search for Ohio address suggestions',
+          parameters: {
+            query: 'string (required, min 2 chars)',
+            limit: 'number (optional, 1-10, default 5)'
+          },
+          example: '/api/ohio-address-suggestions?query=123%20Main&limit=5'
+        },
+        'GET /api/health': 'Health check with system stats',
+        'GET /api/ping': 'Simple ping endpoint'
+      }
     }
   });
 });
@@ -583,24 +645,29 @@ app.get('/api/test', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     service: 'Ohio Address API',
-    version: '2.0.0',
+    version: '2.1.0',
     status: 'operational',
-    endpoints: ['/api/test', '/api/health', '/api/ohio-address-suggestions']
+    environment: process.env.NODE_ENV || 'development',
+    docs: '/api/docs'
   });
 });
 
 // Global error handler
 app.use((error, req, res, next) => {
-  console.error('Global error:', {
+  const errorId = `err_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+  
+  console.error(`[${errorId}] Global error:`, {
     message: error.message,
-    stack: error.stack,
-    url: req.originalUrl
+    stack: CONFIG.ENABLE_DETAILED_LOGGING ? error.stack : undefined,
+    url: req.originalUrl,
+    method: req.method
   });
   
   res.status(500).json({
     success: false,
     error: 'Internal server error',
-    code: 'GLOBAL_ERROR'
+    code: 'GLOBAL_ERROR',
+    errorId: CONFIG.ENABLE_DETAILED_LOGGING ? errorId : undefined
   });
 });
 
@@ -609,30 +676,46 @@ app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
     error: 'Endpoint not found',
-    code: 'NOT_FOUND'
+    code: 'NOT_FOUND',
+    availableEndpoints: ['/', '/api/health', '/api/ping', '/api/ohio-address-suggestions', '/api/docs']
   });
 });
 
 // Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
+  const mode = isProduction ? 'PRODUCTION' : 'DEVELOPMENT';
   console.log(`
-PRODUCTION OHIO ADDRESS API
+🚀 ${mode} OHIO ADDRESS API v2.1.0
 Worker: ${process.pid}
 Port: ${PORT}
 Environment: ${process.env.NODE_ENV || 'development'}
-Cache: ${PRODUCTION_CONFIG.MAX_CACHE_SIZE} entries, ${PRODUCTION_CONFIG.CACHE_TTL / 1000}s TTL
-Rate Limit: ${PRODUCTION_CONFIG.MAX_REQUESTS_PER_HOUR}/hour per IP
-Retry: ${PRODUCTION_CONFIG.MAX_RETRIES} attempts
-Ready for production traffic!
+Security: ${isProduction ? 'Enhanced' : 'Basic'}
+Clustering: ${CONFIG.ENABLE_CLUSTERING ? 'Enabled' : 'Disabled'}
+Cache: ${CONFIG.MAX_CACHE_SIZE} entries
+Rate Limit: ${CONFIG.MAX_REQUESTS_PER_WINDOW}/${CONFIG.RATE_LIMIT_WINDOW / 60000}min
+Ready!
   `);
+  
+  // Setup keep-alive only for free tier
+  if (!isProduction) {
+    setupKeepAlive();
+  }
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log(`Worker ${process.pid} shutting down gracefully`);
+  console.log(`Worker ${process.pid} shutting down gracefully...`);
   server.close(() => {
-    if (cache.cleanupInterval) clearInterval(cache.cleanupInterval);
-    if (rateLimiter.cleanupInterval) clearInterval(rateLimiter.cleanupInterval);
+    cache.destroy();
+    console.log('Shutdown complete');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log(`Worker ${process.pid} received SIGINT, shutting down...`);
+  server.close(() => {
+    cache.destroy();
     process.exit(0);
   });
 });
