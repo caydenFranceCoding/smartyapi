@@ -357,6 +357,11 @@ function formatSmartyStreetsAddress(data) {
     const state = data.components.state_abbreviation || 'OH';
     const zipcode = (data.components.zipcode || '').trim();
     const zip4 = data.components.plus4_code ? `${zipcode}-${data.components.plus4_code}` : zipcode;
+
+    if (!city || !zipcode || city.length === 0 || zipcode.length === 0) {
+      console.log(`Skipping incomplete SmartyStreets result: ${address}, ${city}, ${state} ${zipcode}`);
+      return null;
+    }
     
     // Enhanced confidence scoring based on SmartyStreets data quality indicators
     let confidence = 'medium';
