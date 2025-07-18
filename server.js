@@ -395,39 +395,6 @@ function formatSmartyStreetsAddress(data) {
     return null;
   }
 }
-    
-    // Enhanced confidence scoring based on SmartyStreets data quality indicators
-    let confidence = 'medium';
-    if (data.analysis?.dpv_match_y === 'Y' && data.analysis?.dpv_vacant === 'N') {
-      confidence = 'high';
-    } else if (data.analysis?.dpv_match_n === 'Y' || data.analysis?.dpv_vacant === 'Y') {
-      confidence = 'low';
-    }
-    
-    return {
-      address: address + (unit ? ` ${unit}` : ''),
-      city: city,
-      state: state,
-      zipcode: zip4,
-      verified: true,
-      source: 'smartystreets',
-      confidence: confidence,
-      metadata: {
-        dpv_match: data.analysis?.dpv_match_y === 'Y',
-        vacant: data.analysis?.dpv_vacant === 'Y',
-        business: data.analysis?.dpv_cmra === 'Y',
-        residential: data.analysis?.dpv_cmra !== 'Y',
-        deliverable: data.analysis?.dpv_match_y === 'Y' && data.analysis?.dpv_vacant !== 'Y',
-        county: data.components?.county_name,
-        congressional_district: data.components?.congressional_district,
-        rdi: data.analysis?.rdi
-      }
-    };
-  } catch (error) {
-    console.error('SmartyStreets formatting error:', error);
-    return null;
-  }
-}
 
 function formatNominatimAddress(data) {
   try {
