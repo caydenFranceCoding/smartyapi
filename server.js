@@ -12,35 +12,22 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
-// Production vs Development Configuration
 const CONFIG = {
-  // Cache settings
   CACHE_TTL: isProduction ? 24 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000,
   MAX_CACHE_SIZE: isProduction ? 5000 : 1000,
-  
-  // Rate limiting
-  RATE_LIMIT_WINDOW: isProduction ? 60 * 60 * 1000 : 15 * 60 * 1000, // 1 hour vs 15 min
+  RATE_LIMIT_WINDOW: isProduction ? 60 * 60 * 1000 : 15 * 60 * 1000,
   MAX_REQUESTS_PER_WINDOW: isProduction ? 1000 : 100,
-  
-  // API timeouts
   SMARTYSTREETS_TIMEOUT: isProduction ? 8000 : 3000,
-  NOMINATIM_TIMEOUT: isProduction ? 10000 : 4000,
-  
-  // Retry settings
+  NOMINATIM_TIMEOUT: isProduction ? 5000 : 4000,
   MAX_RETRIES: isProduction ? 3 : 1,
   RETRY_DELAY: isProduction ? 1000 : 500,
-  
-  // Keep-alive (only for free tier)
   KEEP_ALIVE_INTERVAL: isProduction ? null : 14 * 60 * 1000,
-  
-  // Security
   ENABLE_CLUSTERING: isProduction,
   ENABLE_COMPRESSION: isProduction,
   ENABLE_DETAILED_LOGGING: isProduction,
   TRUST_PROXY: isProduction
 };
 
-// Clustering for production
 if (CONFIG.ENABLE_CLUSTERING && cluster.isMaster) {
   const numCPUs = Math.min(os.cpus().length, 4);
   console.log(`🚀 Master ${process.pid} starting ${numCPUs} workers`);
@@ -57,7 +44,6 @@ if (CONFIG.ENABLE_CLUSTERING && cluster.isMaster) {
   return;
 }
 
-// Security middleware for production
 if (isProduction) {
   app.use(helmet({
     contentSecurityPolicy: {
@@ -76,35 +62,29 @@ if (isProduction) {
   }));
 }
 
-// Compression for production
 if (CONFIG.ENABLE_COMPRESSION) {
   app.use(compression());
 }
 
-// Trust proxy setting
 if (CONFIG.TRUST_PROXY) {
   app.set('trust proxy', true);
 }
 
-// Enhanced CORS for production
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
     
-    // Production whitelist
     const allowedOrigins = [
       'https://app.hubspot.com',
       'https://wattkarma.com',
       'https://www.wattkarma.com',
       process.env.FRONTEND_URL,
       process.env.CLIENT_URL,
-      // Regex patterns for subdomains
       /^https:\/\/.*\.hubspot\.com$/,
       /^https:\/\/.*\.hubspotpreview-na1\.com$/,
       /^https:\/\/.*\.wattkarma\.com$/
     ].filter(Boolean);
     
-    // Development: allow localhost
     if (!isProduction) {
       allowedOrigins.push(
         'http://localhost:3000',
@@ -127,7 +107,6 @@ app.use(cors({
       return callback(null, true);
     }
     
-    // Log rejected origins in production
     if (isProduction) {
       console.warn(`CORS rejected origin: ${origin}`);
     }
@@ -135,10 +114,9 @@ app.use(cors({
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
-  maxAge: isProduction ? 86400 : 3600 // Cache preflight longer in production
+  maxAge: isProduction ? 86400 : 3600
 }));
 
-// Body parsing with appropriate limits
 app.use(express.json({ 
   limit: isProduction ? '1mb' : '100kb',
   type: ['application/json', 'text/plain']
@@ -148,8 +126,6 @@ app.use(express.urlencoded({
   limit: isProduction ? '1mb' : '100kb' 
 }));
 
-// Production-grade rate limiting
-// Redis store for rate limiting (optional)
 let redisStore;
 if (process.env.REDIS_URL && isProduction) {
   try {
@@ -169,9 +145,9 @@ if (process.env.REDIS_URL && isProduction) {
       sendCommand: (...args) => redisClient.sendCommand(args),
     });
     
-    console.log('✅ Redis rate limiting enabled');
+    console.log('Redis rate limiting enabled');
   } catch (error) {
-    console.warn('⚠️  Redis setup failed, using memory store:', error.message);
+    console.warn('Redis setup failed, using memory store:', error.message);
   }
 }
 
@@ -185,16 +161,19 @@ const limiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  store: redisStore, // Uses Redis if available, otherwise memory
+  store: redisStore,
+  keyGenerator: (req) => {
+    const ip = req.ip || req.connection.remoteAddress || req.socket.remoteAddress || 'unknown';
+    const userAgent = req.get('User-Agent') || 'unknown';
+    return `${ip}-${userAgent.slice(0, 50)}`;
+  },
   skip: (req) => {
-    // Skip rate limiting for health checks
     return req.path === '/api/health' || req.path === '/api/ping';
   }
 });
 
 app.use('/api/', limiter);
 
-// Production cache with better memory management
 class ProductionCache {
   constructor() {
     this.store = new Map();
@@ -205,7 +184,6 @@ class ProductionCache {
       evictions: 0
     };
     
-    // Cleanup interval based on environment
     const cleanupInterval = isProduction ? 10 * 60 * 1000 : 30 * 60 * 1000;
     this.cleanupTimer = setInterval(() => this.cleanup(), cleanupInterval);
   }
@@ -214,7 +192,6 @@ class ProductionCache {
     const now = Date.now();
     let cleaned = 0;
     
-    // Remove expired entries
     for (const [key, data] of this.store.entries()) {
       if (now - data.timestamp > CONFIG.CACHE_TTL) {
         this.store.delete(key);
@@ -223,7 +200,6 @@ class ProductionCache {
       }
     }
     
-    // LRU eviction if over capacity
     if (this.store.size > CONFIG.MAX_CACHE_SIZE) {
       const sortedByAccess = Array.from(this.accessTimes.entries())
         .sort((a, b) => a[1] - b[1])
@@ -264,7 +240,6 @@ class ProductionCache {
   set(key, value) {
     const now = Date.now();
     
-    // Pre-evict if at capacity
     if (this.store.size >= CONFIG.MAX_CACHE_SIZE && !this.store.has(key)) {
       const oldestKey = Array.from(this.accessTimes.entries())
         .sort((a, b) => a[1] - b[1])[0]?.[0];
@@ -302,7 +277,6 @@ class ProductionCache {
 
 const cache = new ProductionCache();
 
-// Enhanced retry with exponential backoff
 async function retryWithBackoff(fn, maxRetries = CONFIG.MAX_RETRIES) {
   let lastError;
   
@@ -313,7 +287,7 @@ async function retryWithBackoff(fn, maxRetries = CONFIG.MAX_RETRIES) {
       lastError = error;
       
       if (attempt <= maxRetries) {
-        const delay = CONFIG.RETRY_DELAY * Math.pow(2, attempt - 1); // Exponential backoff
+        const delay = CONFIG.RETRY_DELAY * Math.pow(2, attempt - 1);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -322,7 +296,6 @@ async function retryWithBackoff(fn, maxRetries = CONFIG.MAX_RETRIES) {
   throw lastError;
 }
 
-// Pre-configured axios instances with production settings
 const smartyAxios = axios.create({
   baseURL: 'https://us-street.api.smartystreets.com',
   timeout: CONFIG.SMARTYSTREETS_TIMEOUT,
@@ -337,13 +310,12 @@ const nominatimAxios = axios.create({
   baseURL: 'https://nominatim.openstreetmap.org',
   timeout: CONFIG.NOMINATIM_TIMEOUT,
   headers: { 
-    'User-Agent': 'OhioEnergyAPI/2.1',
+    'User-Agent': 'OhioEnergyAPI/2.1 (contact@wattkarma.com)',
     'Accept': 'application/json',
     'Accept-Encoding': 'gzip, deflate'
   }
 });
 
-// Request logging middleware for production
 function requestLogger(req, res, next) {
   if (!CONFIG.ENABLE_DETAILED_LOGGING) return next();
   
@@ -371,7 +343,6 @@ function requestLogger(req, res, next) {
 
 app.use('/api/', requestLogger);
 
-// Enhanced address formatting with validation
 function formatSmartyStreetsAddress(data) {
   try {
     if (!data?.components || !data.delivery_line_1?.trim()) return null;
@@ -434,7 +405,29 @@ function formatNominatimAddress(data) {
   }
 }
 
-// Keep-alive for free tier only
+function getFallbackOhioAddresses(query) {
+  const commonOhioAddresses = [
+    { address: "123 Main St", city: "Columbus", state: "OH", zipcode: "43215", verified: false, source: "fallback", confidence: "fallback" },
+    { address: "456 High St", city: "Columbus", state: "OH", zipcode: "43215", verified: false, source: "fallback", confidence: "fallback" },
+    { address: "789 Broad St", city: "Columbus", state: "OH", zipcode: "43215", verified: false, source: "fallback", confidence: "fallback" },
+    { address: "321 Superior Ave", city: "Cleveland", state: "OH", zipcode: "44101", verified: false, source: "fallback", confidence: "fallback" },
+    { address: "654 Euclid Ave", city: "Cleveland", state: "OH", zipcode: "44101", verified: false, source: "fallback", confidence: "fallback" },
+    { address: "987 Vine St", city: "Cincinnati", state: "OH", zipcode: "45201", verified: false, source: "fallback", confidence: "fallback" },
+    { address: "147 Race St", city: "Cincinnati", state: "OH", zipcode: "45201", verified: false, source: "fallback", confidence: "fallback" },
+    { address: "258 Market St", city: "Akron", state: "OH", zipcode: "44301", verified: false, source: "fallback", confidence: "fallback" },
+    { address: "369 Wayne Ave", city: "Dayton", state: "OH", zipcode: "45402", verified: false, source: "fallback", confidence: "fallback" },
+    { address: "741 Madison Ave", city: "Toledo", state: "OH", zipcode: "43604", verified: false, source: "fallback", confidence: "fallback" }
+  ];
+
+  const queryLower = query.toLowerCase();
+  
+  return commonOhioAddresses.filter(addr => {
+    const addressLower = `${addr.address} ${addr.city}`.toLowerCase();
+    return addressLower.includes(queryLower) || 
+           queryLower.split(' ').some(word => word.length > 2 && addressLower.includes(word));
+  }).slice(0, 5);
+}
+
 function setupKeepAlive() {
   if (CONFIG.KEEP_ALIVE_INTERVAL && process.env.RENDER_SERVICE_URL) {
     setInterval(async () => {
@@ -453,7 +446,6 @@ function setupKeepAlive() {
   }
 }
 
-// Comprehensive health check
 app.get('/api/health', (req, res) => {
   const uptime = process.uptime();
   const memoryUsage = process.memoryUsage();
@@ -477,7 +469,8 @@ app.get('/api/health', (req, res) => {
     cache: cache.getStats(),
     providers: {
       smartystreets: !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN),
-      nominatim: true
+      nominatim: true,
+      fallback: true
     },
     config: {
       clustering: CONFIG.ENABLE_CLUSTERING,
@@ -487,7 +480,6 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Simple ping for monitoring
 app.get('/api/ping', (req, res) => {
   res.json({ 
     success: true, 
@@ -496,14 +488,12 @@ app.get('/api/ping', (req, res) => {
   });
 });
 
-// Main address search endpoint
 app.get('/api/ohio-address-suggestions', async (req, res) => {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
   
   try {
     const { query, limit = 5 } = req.query;
     
-    // Enhanced input validation
     if (!query || typeof query !== 'string' || query.trim().length < 2) {
       return res.status(400).json({
         success: false,
@@ -517,7 +507,6 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
     const resultLimit = Math.min(Math.max(parseInt(limit) || 5, 1), isProduction ? 10 : 8);
     const cacheKey = `ohio_addr:${normalizedQuery}:${resultLimit}`;
     
-    // Check cache first
     const cached = cache.get(cacheKey);
     if (cached) {
       return res.json({
@@ -542,7 +531,6 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
       providers: []
     };
     
-    // Try SmartyStreets first
     const smartyConfigured = !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN);
     
     if (smartyConfigured) {
@@ -585,22 +573,25 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
       }
     }
     
-    // Fallback to Nominatim
     try {
-      const response = await retryWithBackoff(() =>
+      const nominatimResponse = await Promise.race([
         nominatimAxios.get('/search', {
           params: {
             q: `${query.trim()}, Ohio, USA`,
             format: 'json',
             addressdetails: 1,
-            limit: resultLimit + 2, // Get a few extra to filter
-            countrycodes: 'us'
+            limit: Math.min(resultLimit + 2, 8),
+            countrycodes: 'us',
+            'accept-language': 'en'
           }
-        })
-      );
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Nominatim timeout')), 4000)
+        )
+      ]);
       
-      if (Array.isArray(response.data) && response.data.length > 0) {
-        const ohioAddresses = response.data
+      if (Array.isArray(nominatimResponse.data) && nominatimResponse.data.length > 0) {
+        const ohioAddresses = nominatimResponse.data
           .filter(addr => {
             const state = addr.address?.state?.toLowerCase();
             return state && (state.includes('ohio') || state === 'oh');
@@ -609,21 +600,30 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
           .filter(Boolean)
           .slice(0, resultLimit);
         
-        suggestions = ohioAddresses;
-        metadata.source = 'nominatim';
-        metadata.count = ohioAddresses.length;
-        metadata.providers.push('nominatim');
-        
         if (ohioAddresses.length > 0) {
+          suggestions = ohioAddresses;
+          metadata.source = 'nominatim';
+          metadata.count = ohioAddresses.length;
+          metadata.providers.push('nominatim');
           cache.set(cacheKey, suggestions);
         }
-      } else {
-        metadata.providers.push('nominatim_no_results');
       }
       
     } catch (error) {
       console.error(`[${requestId}] Nominatim error:`, error.message);
       metadata.providers.push('nominatim_error');
+    }
+    
+    if (suggestions.length === 0) {
+      const fallbackSuggestions = getFallbackOhioAddresses(normalizedQuery);
+      if (fallbackSuggestions.length > 0) {
+        suggestions = fallbackSuggestions;
+        metadata.source = 'fallback';
+        metadata.count = fallbackSuggestions.length;
+        metadata.providers.push('fallback');
+        
+        cache.set(`${cacheKey}_fallback`, suggestions);
+      }
     }
     
     res.json({
@@ -644,7 +644,6 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
   }
 });
 
-// API documentation endpoint
 app.get('/api/docs', (req, res) => {
   res.json({
     service: 'Ohio Address API',
@@ -666,7 +665,6 @@ app.get('/api/docs', (req, res) => {
   });
 });
 
-// Root endpoint
 app.get('/', (req, res) => {
   res.json({
     service: 'Ohio Address API',
@@ -677,7 +675,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// Global error handler
 app.use((error, req, res, next) => {
   const errorId = `err_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
   
@@ -696,7 +693,6 @@ app.use((error, req, res, next) => {
   });
 });
 
-// 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
@@ -706,7 +702,6 @@ app.use('*', (req, res) => {
   });
 });
 
-// Start server
 const server = app.listen(PORT, '0.0.0.0', () => {
   const mode = isProduction ? 'PRODUCTION' : 'DEVELOPMENT';
   console.log(`
@@ -721,13 +716,11 @@ Rate Limit: ${CONFIG.MAX_REQUESTS_PER_WINDOW}/${CONFIG.RATE_LIMIT_WINDOW / 60000
 Ready!
   `);
   
-  // Setup keep-alive only for free tier
   if (!isProduction) {
     setupKeepAlive();
   }
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log(`Worker ${process.pid} shutting down gracefully...`);
   server.close(() => {
