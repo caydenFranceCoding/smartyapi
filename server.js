@@ -17,9 +17,9 @@ const CONFIG = {
   MAX_CACHE_SIZE: isProduction ? 5000 : 1000,
   RATE_LIMIT_WINDOW: isProduction ? 60 * 60 * 1000 : 15 * 60 * 1000,
   MAX_REQUESTS_PER_WINDOW: isProduction ? 1000 : 100,
-  SMARTYSTREETS_TIMEOUT: isProduction ? 8000 : 3000,
+  SMARTYSTREETS_TIMEOUT: isProduction ? 10000 : 5000, // Increased timeout
   NOMINATIM_TIMEOUT: isProduction ? 5000 : 4000,
-  MAX_RETRIES: isProduction ? 3 : 1,
+  MAX_RETRIES: isProduction ? 3 : 2, // Increased retries for dev
   RETRY_DELAY: isProduction ? 1000 : 500,
   KEEP_ALIVE_INTERVAL: isProduction ? null : 14 * 60 * 1000,
   ENABLE_CLUSTERING: isProduction,
@@ -289,6 +289,7 @@ async function retryWithBackoff(fn, maxRetries = CONFIG.MAX_RETRIES) {
       if (attempt <= maxRetries) {
         const delay = CONFIG.RETRY_DELAY * Math.pow(2, attempt - 1);
         await new Promise(resolve => setTimeout(resolve, delay));
+        console.log(`SmartyStreets retry attempt ${attempt}/${maxRetries} after ${delay}ms delay`);
       }
     }
   }
@@ -296,13 +297,15 @@ async function retryWithBackoff(fn, maxRetries = CONFIG.MAX_RETRIES) {
   throw lastError;
 }
 
+// Enhanced SmartyStreets client with better error handling
 const smartyAxios = axios.create({
   baseURL: 'https://us-street.api.smartystreets.com',
   timeout: CONFIG.SMARTYSTREETS_TIMEOUT,
   headers: { 
-    'User-Agent': 'OhioEnergyAPI/2.1',
+    'User-Agent': 'WattKarma-OhioEnergyAPI/2.1',
     'Accept': 'application/json',
-    'Accept-Encoding': 'gzip, deflate'
+    'Accept-Encoding': 'gzip, deflate',
+    'Content-Type': 'application/json'
   }
 });
 
@@ -343,21 +346,44 @@ function requestLogger(req, res, next) {
 
 app.use('/api/', requestLogger);
 
+// Enhanced SmartyStreets address formatter with better data extraction
 function formatSmartyStreetsAddress(data) {
   try {
     if (!data?.components || !data.delivery_line_1?.trim()) return null;
     
     const address = data.delivery_line_1.trim();
     const unit = data.delivery_line_2?.trim();
+    const city = (data.components.city_name || '').trim();
+    const state = data.components.state_abbreviation || 'OH';
+    const zipcode = (data.components.zipcode || '').trim();
+    const zip4 = data.components.plus4_code ? `${zipcode}-${data.components.plus4_code}` : zipcode;
+    
+    // Enhanced confidence scoring based on SmartyStreets data quality indicators
+    let confidence = 'medium';
+    if (data.analysis?.dpv_match_y === 'Y' && data.analysis?.dpv_vacant === 'N') {
+      confidence = 'high';
+    } else if (data.analysis?.dpv_match_n === 'Y' || data.analysis?.dpv_vacant === 'Y') {
+      confidence = 'low';
+    }
     
     return {
       address: address + (unit ? ` ${unit}` : ''),
-      city: (data.components.city_name || '').trim(),
-      state: data.components.state_abbreviation || 'OH',
-      zipcode: (data.components.zipcode || '').trim(),
+      city: city,
+      state: state,
+      zipcode: zip4,
       verified: true,
       source: 'smartystreets',
-      confidence: data.analysis?.dpv_match_y ? 'high' : 'medium'
+      confidence: confidence,
+      metadata: {
+        dpv_match: data.analysis?.dpv_match_y === 'Y',
+        vacant: data.analysis?.dpv_vacant === 'Y',
+        business: data.analysis?.dpv_cmra === 'Y',
+        residential: data.analysis?.dpv_cmra !== 'Y',
+        deliverable: data.analysis?.dpv_match_y === 'Y' && data.analysis?.dpv_vacant !== 'Y',
+        county: data.components?.county_name,
+        congressional_district: data.components?.congressional_district,
+        rdi: data.analysis?.rdi
+      }
     };
   } catch (error) {
     console.error('SmartyStreets formatting error:', error);
@@ -397,7 +423,13 @@ function formatNominatimAddress(data) {
       zipcode: (addr.postcode || '').trim(),
       verified: false,
       source: 'nominatim',
-      confidence: 'low'
+      confidence: 'low',
+      metadata: {
+        lat: parseFloat(data.lat) || null,
+        lon: parseFloat(data.lon) || null,
+        display_name: data.display_name,
+        importance: parseFloat(data.importance) || 0
+      }
     };
   } catch (error) {
     console.error('Nominatim formatting error:', error);
@@ -446,6 +478,44 @@ function setupKeepAlive() {
   }
 }
 
+// Enhanced SmartyStreets validation function
+async function validateSmartyStreetsConfig() {
+  const authId = process.env.SMARTYSTREETS_AUTH_ID;
+  const authToken = process.env.SMARTYSTREETS_AUTH_TOKEN;
+  
+  if (!authId || !authToken) {
+    console.warn('SmartyStreets credentials not found in environment variables');
+    return false;
+  }
+  
+  try {
+    // Test the credentials with a simple validation call
+    const testResponse = await smartyAxios.get('/street-address', {
+      params: {
+        'auth-id': authId,
+        'auth-token': authToken,
+        street: '1 Rosedale',
+        city: 'Baltimore',
+        state: 'MD',
+        candidates: 1
+      },
+      timeout: 5000
+    });
+    
+    console.log('✅ SmartyStreets credentials validated successfully');
+    return true;
+  } catch (error) {
+    if (error.response?.status === 401) {
+      console.error('❌ SmartyStreets authentication failed - check your credentials');
+    } else if (error.response?.status === 402) {
+      console.error('❌ SmartyStreets payment required - check your account balance');
+    } else {
+      console.warn(`⚠️ SmartyStreets validation inconclusive: ${error.message}`);
+    }
+    return false;
+  }
+}
+
 app.get('/api/health', (req, res) => {
   const uptime = process.uptime();
   const memoryUsage = process.memoryUsage();
@@ -468,7 +538,11 @@ app.get('/api/health', (req, res) => {
     },
     cache: cache.getStats(),
     providers: {
-      smartystreets: !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN),
+      smartystreets: {
+        configured: !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN),
+        authId: process.env.SMARTYSTREETS_AUTH_ID ? `${process.env.SMARTYSTREETS_AUTH_ID.substring(0, 4)}****` : 'not set',
+        authToken: process.env.SMARTYSTREETS_AUTH_TOKEN ? '****' : 'not set'
+      },
       nominatim: true,
       fallback: true
     },
@@ -486,6 +560,57 @@ app.get('/api/ping', (req, res) => {
     timestamp: Date.now(),
     worker: process.pid 
   });
+});
+
+// New endpoint to test SmartyStreets specifically
+app.get('/api/test-smartystreets', async (req, res) => {
+  const { address = '1 Rosedale', city = 'Baltimore', state = 'MD' } = req.query;
+  
+  const authId = process.env.SMARTYSTREETS_AUTH_ID;
+  const authToken = process.env.SMARTYSTREETS_AUTH_TOKEN;
+  
+  if (!authId || !authToken) {
+    return res.status(400).json({
+      success: false,
+      error: 'SmartyStreets credentials not configured',
+      message: 'Please set SMARTYSTREETS_AUTH_ID and SMARTYSTREETS_AUTH_TOKEN environment variables'
+    });
+  }
+  
+  try {
+    const response = await smartyAxios.get('/street-address', {
+      params: {
+        'auth-id': authId,
+        'auth-token': authToken,
+        street: address,
+        city: city,
+        state: state,
+        candidates: 3
+      }
+    });
+    
+    const formatted = response.data.map(formatSmartyStreetsAddress).filter(Boolean);
+    
+    res.json({
+      success: true,
+      message: 'SmartyStreets API working correctly',
+      test_query: { address, city, state },
+      results: formatted,
+      raw_response_count: response.data.length,
+      formatted_count: formatted.length
+    });
+    
+  } catch (error) {
+    console.error('SmartyStreets test error:', error.response?.data || error.message);
+    
+    res.status(error.response?.status || 500).json({
+      success: false,
+      error: 'SmartyStreets API error',
+      message: error.response?.data?.message || error.message,
+      status: error.response?.status,
+      test_query: { address, city, state }
+    });
+  }
 });
 
 app.get('/api/test-fallback', (req, res) => {
@@ -546,18 +671,24 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
       providers: []
     };
     
-    const smartyConfigured = !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN);
+    const authId = process.env.SMARTYSTREETS_AUTH_ID;
+    const authToken = process.env.SMARTYSTREETS_AUTH_TOKEN;
+    const smartyConfigured = !!(authId && authToken);
     
     if (smartyConfigured) {
       try {
+        console.log(`[${requestId}] Trying SmartyStreets for: "${normalizedQuery}"`);
+        
+        // Enhanced SmartyStreets query with better parameters
         const response = await retryWithBackoff(() =>
           smartyAxios.get('/street-address', {
             params: {
-              'auth-id': process.env.SMARTYSTREETS_AUTH_ID,
-              'auth-token': process.env.SMARTYSTREETS_AUTH_TOKEN,
+              'auth-id': authId,
+              'auth-token': authToken,
               street: query.trim(),
               state: 'OH',
-              candidates: resultLimit
+              candidates: Math.min(resultLimit + 2, 10), // Get a few extra to filter
+              match: 'enhanced' // Use enhanced matching for better results
             }
           })
         );
@@ -566,6 +697,7 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
           const formatted = response.data
             .map(formatSmartyStreetsAddress)
             .filter(Boolean)
+            .filter(addr => addr.state === 'OH') // Double check it's Ohio
             .slice(0, resultLimit);
           
           if (formatted.length > 0) {
@@ -573,24 +705,32 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
             metadata.source = 'smartystreets';
             metadata.count = formatted.length;
             metadata.providers.push('smartystreets');
+            metadata.smartystreets_raw_count = response.data.length;
             
             cache.set(cacheKey, suggestions);
+            console.log(`[${requestId}] SmartyStreets success: ${formatted.length} results`);
             
             return res.json({ success: true, suggestions, metadata });
           }
         }
         
-        metadata.providers.push('smartystreets_no_results');
+        console.log(`[${requestId}] SmartyStreets returned no Ohio addresses`);
+        metadata.providers.push('smartystreets_no_ohio_results');
         
       } catch (error) {
-        console.error(`[${requestId}] SmartyStreets error:`, error.message);
-        metadata.providers.push('smartystreets_error');
+        console.error(`[${requestId}] SmartyStreets error:`, error.response?.status, error.message);
+        metadata.providers.push(`smartystreets_error_${error.response?.status || 'unknown'}`);
+        metadata.smartystreets_error = error.response?.data?.message || error.message;
       }
     } else {
+      console.log(`[${requestId}] SmartyStreets not configured (missing credentials)`);
       metadata.providers.push('smartystreets_not_configured');
     }
     
+    // Fall back to Nominatim
     try {
+      console.log(`[${requestId}] Trying Nominatim for: "${normalizedQuery}"`);
+      
       const nominatimResponse = await Promise.race([
         nominatimAxios.get('/search', {
           params: {
@@ -622,8 +762,10 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
           metadata.source = 'nominatim';
           metadata.count = ohioAddresses.length;
           metadata.providers.push('nominatim');
+          metadata.nominatim_raw_count = nominatimResponse.data.length;
           cache.set(cacheKey, suggestions);
           
+          console.log(`[${requestId}] Nominatim success: ${ohioAddresses.length} results`);
           return res.json({ success: true, suggestions, metadata });
         } else {
           metadata.providers.push('nominatim_no_ohio_results');
@@ -637,6 +779,7 @@ app.get('/api/ohio-address-suggestions', async (req, res) => {
       metadata.providers.push('nominatim_error');
     }
     
+    // Use fallback addresses
     console.log(`[${requestId}] Using fallback addresses for query: "${normalizedQuery}"`);
     const fallbackSuggestions = getFallbackOhioAddresses(normalizedQuery);
     
@@ -699,9 +842,22 @@ app.get('/api/docs', (req, res) => {
           },
           example: '/api/ohio-address-suggestions?query=123%20Main&limit=5'
         },
+        'GET /api/test-smartystreets': {
+          description: 'Test SmartyStreets API connection',
+          parameters: {
+            address: 'string (optional, default "1 Rosedale")',
+            city: 'string (optional, default "Baltimore")',
+            state: 'string (optional, default "MD")'
+          },
+          example: '/api/test-smartystreets?address=123%20Main&city=Columbus&state=OH'
+        },
         'GET /api/test-fallback': 'Test fallback addresses',
         'GET /api/health': 'Health check with system stats',
         'GET /api/ping': 'Simple ping endpoint'
+      },
+      smartystreets: {
+        configured: !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN),
+        required_env_vars: ['SMARTYSTREETS_AUTH_ID', 'SMARTYSTREETS_AUTH_TOKEN']
       }
     }
   });
@@ -713,7 +869,8 @@ app.get('/', (req, res) => {
     version: '2.1.0',
     status: 'operational',
     environment: process.env.NODE_ENV || 'development',
-    docs: '/api/docs'
+    docs: '/api/docs',
+    smartystreets_configured: !!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN)
   });
 });
 
@@ -740,7 +897,7 @@ app.use('*', (req, res) => {
     success: false,
     error: 'Endpoint not found',
     code: 'NOT_FOUND',
-    availableEndpoints: ['/', '/api/health', '/api/ping', '/api/ohio-address-suggestions', '/api/test-fallback', '/api/docs']
+    availableEndpoints: ['/', '/api/health', '/api/ping', '/api/ohio-address-suggestions', '/api/test-smartystreets', '/api/test-fallback', '/api/docs']
   });
 });
 
@@ -755,8 +912,14 @@ Security: ${isProduction ? 'Enhanced' : 'Basic'}
 Clustering: ${CONFIG.ENABLE_CLUSTERING ? 'Enabled' : 'Disabled'}
 Cache: ${CONFIG.MAX_CACHE_SIZE} entries
 Rate Limit: ${CONFIG.MAX_REQUESTS_PER_WINDOW}/${CONFIG.RATE_LIMIT_WINDOW / 60000}min
+SmartyStreets: ${!!(process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN) ? '✅ Configured' : '❌ Not Configured'}
 Ready!
   `);
+  
+  // Validate SmartyStreets on startup
+  if (process.env.SMARTYSTREETS_AUTH_ID && process.env.SMARTYSTREETS_AUTH_TOKEN) {
+    validateSmartyStreetsConfig();
+  }
   
   if (!isProduction) {
     setupKeepAlive();
