@@ -394,7 +394,7 @@ function formatSmartyStreetsAddress(data) {
     console.error('SmartyStreets formatting error:', error);
     return null;
   }
-},
+}
     
     // Enhanced confidence scoring based on SmartyStreets data quality indicators
     let confidence = 'medium';
