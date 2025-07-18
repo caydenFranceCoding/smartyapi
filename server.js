@@ -358,7 +358,6 @@ function formatSmartyStreetsAddress(data) {
     const zipcode = (data.components.zipcode || '').trim();
     const zip4 = data.components.plus4_code ? `${zipcode}-${data.components.plus4_code}` : zipcode;
     
-    // ADD THIS VALIDATION - Only return complete addresses
     if (!city || !zipcode) {
       console.log(`Filtering incomplete SmartyStreets result: "${address}" missing city or ZIP`);
       return null;
@@ -395,7 +394,7 @@ function formatSmartyStreetsAddress(data) {
     console.error('SmartyStreets formatting error:', error);
     return null;
   }
-}
+},
     
     // Enhanced confidence scoring based on SmartyStreets data quality indicators
     let confidence = 'medium';
